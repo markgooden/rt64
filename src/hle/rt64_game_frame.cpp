@@ -582,6 +582,24 @@ namespace RT64 {
         const hlslpp::float4x4 &firstCurViewProj = firstCurWorkload.drawData.viewProjTransforms[firstCurProj.transformsIndex];
         const hlslpp::float4x4 &firstPrevViewProj = firstPrevWorkload.drawData.viewProjTransforms[firstPrevProj.transformsIndex];
         for (const IndexPair &indices : transformCheckSet) {
+            // The check sets are filled by walking every projection of every workload in the
+            // scene (:521-573), so an index in them belongs to whichever workload produced it.
+            // Everything below indexes the *first* workload's data and map (:414), sized from
+            // that one workload (:275-287). A pair from any other workload is therefore not
+            // guaranteed to be in range, and reading out of range here is an access violation
+            // in GameFrame::matchScene - reproduced on the ray tracing path, which turns frame
+            // matching on unconditionally (rt64_workload_queue.cpp:1002).
+            //
+            // The pre-existing FIXME at :513 is this same defect: the sets need to be per
+            // unique workload. Until they are, a pair that is not addressable here is skipped.
+            // A pair that is in range behaves exactly as before, so no defined behaviour
+            // changes; only the undefined case does. Upstream proposal, not a local workaround.
+            if ((indices.first >= firstCurWorkload.drawData.worldTransforms.size()) ||
+                (indices.second >= firstPrevWorkload.drawData.worldTransforms.size()) ||
+                ((firstPrevWorkloadMap != nullptr) && (indices.second >= firstPrevWorkloadMap->transforms.size()))) {
+                continue;
+            }
+
             const hlslpp::float4x4 &curTransform = firstCurWorkload.drawData.worldTransforms[indices.first];
             const hlslpp::float4x4 &prevTransform = firstPrevWorkload.drawData.worldTransforms[indices.second];
             prevRigidBody = (firstPrevWorkloadMap != nullptr) ? &firstPrevWorkloadMap->transforms[indices.second].rigidBody : nullptr;
@@ -612,6 +630,14 @@ namespace RT64 {
 
         // Check for tile matches.
         for (const IndexPair &indices : tileCheckSet) {
+            // Same cross-workload hazard as the transform loop above.
+            if ((indices.first >= firstCurWorkloadMap.tiles.size()) ||
+                (indices.second >= firstCurWorkloadMap.prevTilesMapped.size()) ||
+                (indices.first >= firstCurWorkload.drawData.rdpTiles.size()) ||
+                (indices.second >= firstPrevWorkload.drawData.rdpTiles.size())) {
+                continue;
+            }
+
             if (firstCurWorkloadMap.tiles[indices.first].mapped) {
                 continue;
             }
@@ -684,6 +710,15 @@ namespace RT64 {
 
         // Check for look at matches.
         for (const IndexPair &indices : lookAtCheckSet) {
+            // Same cross-workload hazard as the transform loop above. This is the one that
+            // actually crashed: lookAt is sized from rspLookAt, which is commonly empty, so
+            // any index at all is out of range.
+            if ((indices.first >= firstCurWorkloadMap.lookAt.size()) ||
+                (indices.second >= firstCurWorkloadMap.prevLookAtMapped.size()) ||
+                ((firstPrevWorkloadMap != nullptr) && (indices.second >= firstPrevWorkloadMap->lookAt.size()))) {
+                continue;
+            }
+
             if (firstCurWorkloadMap.lookAt[indices.first].mapped) {
                 continue;
             }
