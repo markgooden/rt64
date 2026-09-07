@@ -321,10 +321,30 @@ namespace RT64 {
     void RaytracingResources::updateTopLevelASResources(RenderWorker *worker, const std::vector<InstanceDrawCall> &instanceDrawCalls, const std::vector<uint32_t> &instanceIndices) {
         assert(worker != nullptr);
 
-        // The scene's instances and this frame's bottom level structures come out of the
-        // same walk, so they are parallel lists. Anything else means the walk changed and
-        // the mapping below stopped being meaningful.
-        assert(instanceIndices.size() == bottomLevelASVector.size());
+        // Map each instance to its structure by counting, not by position.
+        //
+        // The two lists are not parallel, which an earlier version of this assumed and an
+        // assert claimed. Structures are added once per raytraced draw call across the
+        // whole frame (rt64_framebuffer_renderer.cpp:1596), while instanceIndices belongs
+        // to one scene, and a frame can produce several. A frame here reported ten
+        // structures against a single instance: nine of them belonged to other draw calls,
+        // so instance zero was pointing at whichever structure happened to be first. The
+        // top level structure then referenced geometry that was never built for it, which
+        // the debug layer cannot see - every call is valid - and the driver reports as an
+        // internal error a few frames later.
+        //
+        // What is reliable is the order: structures are added in the same order the draw
+        // calls are appended, and only for raytraced ones. So the structure for a draw call
+        // is the number of raytraced draw calls that precede it.
+        thread_local std::vector<uint32_t> blasIndexByDrawCall;
+        blasIndexByDrawCall.assign(instanceDrawCalls.size(), UINT32_MAX);
+
+        uint32_t raytracedSoFar = 0;
+        for (size_t i = 0; i < instanceDrawCalls.size(); i++) {
+            if (instanceDrawCalls[i].type == InstanceDrawCall::Type::Raytracing) {
+                blasIndexByDrawCall[i] = raytracedSoFar++;
+            }
+        }
 
         if (reportDeviceRemoval(worker->device, graphicsAPI, "the top level acceleration structure")) {
             return;
@@ -334,12 +354,25 @@ namespace RT64 {
         topLevelASInstances.reserve(instanceIndices.size());
 
         for (size_t i = 0; i < instanceIndices.size(); i++) {
-            const BottomLevelAS &blas = bottomLevelASVector[i];
+            const uint32_t drawCallIndex = instanceIndices[i];
+            if (drawCallIndex >= blasIndexByDrawCall.size()) {
+                continue;
+            }
+
+            const uint32_t blasIndex = blasIndexByDrawCall[drawCallIndex];
+            if (blasIndex >= bottomLevelASVector.size()) {
+                // Either the draw call is not raytraced, or it produced no structure. Both
+                // mean there is nothing to place in the top level structure for it, and
+                // both used to be silently indexed past instead.
+                continue;
+            }
+
+            const BottomLevelAS &blas = bottomLevelASVector[blasIndex];
             if (blas.accelerationStructure == nullptr) {
                 continue;
             }
 
-            const InstanceDrawCall &drawCall = instanceDrawCalls[instanceIndices[i]];
+            const InstanceDrawCall &drawCall = instanceDrawCalls[drawCallIndex];
             assert(drawCall.type == InstanceDrawCall::Type::Raytracing);
 
             RenderTopLevelASInstance instance;
