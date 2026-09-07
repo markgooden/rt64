@@ -457,6 +457,47 @@ namespace RT64 {
             }
         }
 #   endif
+#   if RT_ENABLED
+        // One-shot dump of the common set's binding indices, to find a slot that two bindings
+        // share or that nothing writes. The shader addresses these by register; the builder
+        // hands out the descriptor index, and the two only agree if every binding got its own.
+        if (raytracingEnabled && (getenv("PDRT64_RT_DUMPSET") != nullptr)) {
+            static bool dumpedSet = false;
+            if (!dumpedSet) {
+                dumpedSet = true;
+                const struct { const char *name; uint32_t index; } bindings[] = {
+                    { "FrParams", descCommonSet->FrParams },
+                    { "instanceRDPParams", descCommonSet->instanceRDPParams },
+                    { "RDPTiles", descCommonSet->RDPTiles },
+                    { "GPUTiles", descCommonSet->GPUTiles },
+                    { "instanceRenderIndices", descCommonSet->instanceRenderIndices },
+                    { "DynamicRenderParams", descCommonSet->DynamicRenderParams },
+                    { "RtParams", descCommonSet->RtParams },
+                    { "SceneBVH", descCommonSet->SceneBVH },
+                    { "posBuffer", descCommonSet->posBuffer },
+                    { "normBuffer", descCommonSet->normBuffer },
+                    { "velBuffer", descCommonSet->velBuffer },
+                    { "genTexCoordBuffer", descCommonSet->genTexCoordBuffer },
+                    { "shadedColBuffer", descCommonSet->shadedColBuffer },
+                    { "srcFogIndices", descCommonSet->srcFogIndices },
+                    { "srcLightIndices", descCommonSet->srcLightIndices },
+                    { "srcLightCounts", descCommonSet->srcLightCounts },
+                    { "indexBuffer", descCommonSet->indexBuffer },
+                    { "RSPFogVector", descCommonSet->RSPFogVector },
+                    { "RSPLightVector", descCommonSet->RSPLightVector },
+                    { "instanceExtraParams", descCommonSet->instanceExtraParams },
+                    { "SceneLights", descCommonSet->SceneLights },
+                    { "interleavedRasters", descCommonSet->interleavedRasters }
+                };
+
+                for (const auto &b : bindings) {
+                    fprintf(stderr, "rt64: commonset %-22s index %u\n", b.name, b.index);
+                }
+
+                fflush(stderr);
+            }
+        }
+#   endif
         descCommonSet->setBuffer(descCommonSet->instanceRenderIndices, renderIndicesBuffer.get(), RenderBufferStructuredView(sizeof(interop::RenderIndices)));
         descCommonSet->setBuffer(descCommonSet->instanceRDPParams, drawBuffers->rdpParamsBuffer.get(), RenderBufferStructuredView(sizeof(interop::RDPParams)));
         descCommonSet->setBuffer(descCommonSet->RDPTiles, drawBuffers->rdpTilesBuffer.get(), RenderBufferStructuredView(sizeof(interop::RDPTile)));
