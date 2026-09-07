@@ -13,6 +13,8 @@ option(RT64_STATIC "Build RT64 as a static library" OFF)
 
 option(RT64_SDL_WINDOW_VULKAN "Build RT64 to expect an SDL Window outside of Windows" OFF)
 
+option(RT64_RAYTRACING "Build the path tracer (RT_ENABLED). Off keeps the raster-only build byte-identical." OFF)
+
 if (NOT ${RT64_STATIC})
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
@@ -300,6 +302,10 @@ add_compile_definitions(
     FFX_GCC
     IMGUI_IMPL_VULKAN_NO_PROTOTYPES
 )
+
+if (RT64_RAYTRACING)
+    add_compile_definitions("RT_ENABLED")
+endif()
 
 if (CMAKE_SYSTEM_NAME MATCHES "Linux" AND RT64_SDL_WINDOW_VULKAN)
     add_compile_definitions("PLUME_SDL_VULKAN_ENABLED")
