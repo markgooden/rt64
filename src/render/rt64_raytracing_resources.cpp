@@ -200,6 +200,42 @@ namespace RT64 {
         worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(topLevelASBuffer.get(), RenderBufferAccess::READ));
     }
 
+    // Shader binding table.
+
+    void RaytracingResources::createShaderBindingTable(RenderWorker *worker, const RaytracingState *rtState, RenderDescriptorSet **descriptorSets, uint32_t descriptorSetCount, const std::vector<RenderPipelineProgram> &hitGroups) {
+        assert(worker != nullptr);
+        assert(rtState != nullptr);
+        assert(rtState->pipeline != nullptr);
+
+        // The frame graph selects a ray generation program by index rather than by rebuilding
+        // the table, so all five have to be in it, in order
+        // (rt64_framebuffer_renderer.cpp:808, 833, 838, 848, 861).
+        RenderShaderBindingGroups groups;
+        groups.rayGen = RenderShaderBindingGroup(rtState->rayGenPrograms.data(), uint32_t(rtState->rayGenPrograms.size()));
+        groups.miss = RenderShaderBindingGroup(rtState->missPrograms.data(), uint32_t(rtState->missPrograms.size()));
+        groups.hitGroup = RenderShaderBindingGroup(hitGroups.data(), uint32_t(hitGroups.size()));
+
+        worker->device->setShaderBindingTableInfo(shaderBindingTableInfo, groups, rtState->pipeline.get(), descriptorSets, descriptorSetCount);
+
+        // As with the top level instances, plume fills the table's bytes and leaves the
+        // upload to us. It is rewritten whenever the descriptor sets change, which is every
+        // frame, so it lives in an upload heap rather than being staged.
+        const uint64_t tableSize = uint64_t(shaderBindingTableInfo.tableBufferData.size());
+        if (tableSize == 0) {
+            return;
+        }
+
+        if ((shaderBindingTableBuffer == nullptr) || (shaderBindingTableSize < tableSize)) {
+            shaderBindingTableSize = allocationForSize(tableSize);
+            shaderBindingTableBuffer = worker->device->createBuffer(RenderBufferDesc::UploadBuffer(shaderBindingTableSize, RenderBufferFlag::SHADER_BINDING_TABLE));
+        }
+
+        const RenderRange writtenRange(0, tableSize);
+        void *dstData = shaderBindingTableBuffer->map();
+        memcpy(dstData, shaderBindingTableInfo.tableBufferData.data(), tableSize);
+        shaderBindingTableBuffer->unmap(0, &writtenRange);
+    }
+
     // Output resources.
     //
     // Formats are not free choices. The component counts come from the UAV declarations in

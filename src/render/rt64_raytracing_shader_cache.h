@@ -65,6 +65,13 @@ namespace RT64 {
         std::unique_ptr<RenderPipeline> pipeline;
         std::unordered_map<uint64_t, RaytracingShaderPrograms> shaderProgramsMap;
 
+        // The ray generation and miss programs the shader binding table is built from.
+        // rayGenPrograms is ordered: the frame graph picks one by writing a fixed index into
+        // groups.rayGen.startIndex (rt64_framebuffer_renderer.cpp:808, 833, 838, 848, 861),
+        // so position in this vector is what those numbers mean.
+        std::vector<RenderPipelineProgram> rayGenPrograms;
+        std::vector<RenderPipelineProgram> missPrograms;
+
         const RaytracingShaderPrograms &getShaderPrograms(const ShaderDescription &desc) const;
     };
 

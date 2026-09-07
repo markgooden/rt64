@@ -423,6 +423,8 @@ set (SOURCES
 if (RT64_RAYTRACING)
     list(APPEND SOURCES
         "${PROJECT_SOURCE_DIR}/src/render/rt64_raytracing_resources.cpp"
+        "${PROJECT_SOURCE_DIR}/src/render/rt64_raytracing_shader_cache.cpp"
+        "${PROJECT_SOURCE_DIR}/src/res/bluenoise/LDR_64_64_64_RGB1.cpp"
     )
 endif()
 
@@ -545,6 +547,11 @@ build_compute_shader(rt64 "src/shaders/RSPWorldCS.hlsl")
 build_compute_shader(rt64 "src/shaders/RSPSmoothNormalCS.hlsl")
 build_compute_shader(rt64 "src/shaders/RSPVertexTestZCS.hlsl")
 build_compute_shader(rt64 "src/shaders/RSPVertexTestZCS.hlsl" "src/shaders/RSPVertexTestZCSMS.hlsl" "-D MULTISAMPLING")
+
+if (RT64_RAYTRACING)
+    build_ray_shader(rt64 "src/shaders/RaytracingLib.hlsl")
+endif()
+
 build_pixel_shader(  rt64 "src/shaders/RtCopyColorToDepthPS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/RtCopyColorToDepthPS.hlsl" "src/shaders/RtCopyColorToDepth2XPS.hlsl" "-D SAMPLES_2X")
 build_pixel_shader(  rt64 "src/shaders/RtCopyColorToDepthPS.hlsl" "src/shaders/RtCopyColorToDepth4XPS.hlsl" "-D SAMPLES_4X")

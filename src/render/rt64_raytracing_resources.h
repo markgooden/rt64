@@ -123,6 +123,7 @@ namespace RT64 {
         // (rt64_framebuffer_renderer.cpp:808, 833, 838, 848, 861).
         std::unique_ptr<RenderBuffer> shaderBindingTableBuffer;
         RenderShaderBindingTableInfo shaderBindingTableInfo;
+        uint64_t shaderBindingTableSize = 0;
 
         // Ray generation inputs and the shading G-buffer.
         std::unique_ptr<RenderTexture> viewDirectionTexture;
