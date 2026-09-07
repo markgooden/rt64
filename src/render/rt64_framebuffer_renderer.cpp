@@ -747,6 +747,25 @@ namespace RT64 {
         rtParams.binaryLockMask = (rtResources->upscalerMode != UpscaleMode::FSR);
         rtParams.interleavedRastersCount = interleavedRastersCount;
         
+    }
+
+    // Split out of updateRaytracingScene, which used to end with this and ran before
+    // updateShaderViews. That order cannot work, for two reasons that pull in opposite
+    // directions and are why this is a second function rather than a move.
+    //
+    // These three calls have to happen *after* updateShaderViews. descTextureSet is
+    // created there (:313-316), so on the first frame that traces it is still null here
+    // and dereferencing it is what crashed. Worse than the crash: updateShaderViews is
+    // also what binds every RT texture and buffer into descCommonSet (:325-370), and
+    // createShaderBindingTable bakes descriptor table handles into each shader record
+    // (contrib/plume/plume_d3d12.cpp:4083-4093), so a table built beforehand would
+    // quietly carry last frame's descriptors.
+    //
+    // The parameter half has to happen *before* it. updateRaytracingScene writes
+    // rtParams, and endFramebuffers hands a pointer to rtParams to the buffer uploader,
+    // which copies it on another thread once submit returns - so writing it afterwards
+    // would be a data race against that copy.
+    void FramebufferRenderer::updateRaytracingResources(RenderWorker *worker, const RaytracingScene &rtScene) {
         Framebuffer &framebuffer = framebufferVector[framebufferCount - 1];
         RenderDescriptorSet *descRealDepthSet = framebuffer.descRealFbSet->get();
         RenderDescriptorSet *descriptorSets[] = { descCommonSet->get(), descTextureSet->get(), descTextureSet->get(), descRealDepthSet };
@@ -754,7 +773,7 @@ namespace RT64 {
         rtResources->createShaderBindingTable(worker, rtState, descriptorSets, uint32_t(std::size(descriptorSets)), hitGroupVector);
         rtResources->updateLightsBuffer(worker, rtScene);
     }
-    
+
     void FramebufferRenderer::submitRaytracingScene(RenderWorker *worker, RenderTarget *colorTarget, const RaytracingScene &rtScene) {
         // Once, on the first frame that actually traces. Whether a frame reaches this
         // at all is the first question worth answering when the path tracer appears to
@@ -1846,6 +1865,13 @@ namespace RT64 {
 
         shaderUploader->submit(worker, shaderUploads);
         updateShaderViews(worker, drawBuffers, outputBuffers, shaderViewRtEnabled);
+
+#   if RT_ENABLED
+        // Only now are the descriptor sets this frame's. See updateRaytracingResources.
+        if (chosenRtScene != nullptr) {
+            updateRaytracingResources(worker, *chosenRtScene);
+        }
+#   endif
     }
 
     void FramebufferRenderer::advanceFrame(bool rtEnabled) {

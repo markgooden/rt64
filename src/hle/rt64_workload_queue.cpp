@@ -303,7 +303,22 @@ namespace RT64 {
         rendererCPUProfiler.start();
 
         const bool aspectRatioAdjustment = (abs(workloadConfig.aspectRatioScale - 1.0f) > 1e-6f);
-        const bool processProjections = aspectRatioAdjustment || prevFrame.matched|| curFrame.isDebuggerCameraEnabled(*this);
+
+        // Raytracing is a fourth reason to process projections, and a hard requirement
+        // rather than an improvement. ProjectionProcessor::process is the only thing
+        // that fills modViewTransforms and prevViewTransforms
+        // (rt64_projection_processor.cpp:35-40); the raster path never reads them, but
+        // the RT scene reads all four unconditionally when it captures a projection
+        // (rt64_framebuffer_renderer.cpp:1728-1731) and compares against them when it
+        // decides whether a later draw call belongs to the same scene (:1469-1470).
+        // Without this, a frame with no aspect ratio adjustment and no matched
+        // previous frame - which is every first frame - leaves those vectors empty and
+        // the RT path indexes into nothing.
+        //
+        // raytracingEnabled is a plain bool that is false in every raster build
+        // (rt64_workload_queue.h:53), so this reads the same as before when the path
+        // tracer is not compiled in, let alone enabled.
+        const bool processProjections = aspectRatioAdjustment || prevFrame.matched || curFrame.isDebuggerCameraEnabled(*this) || workloadConfig.raytracingEnabled;
         bool uploadProjections = false;
         if (processProjections) {
             ProjectionProcessor::ProcessParams projParams;
@@ -319,7 +334,13 @@ namespace RT64 {
             uploadProjections = true;
         }
 
-        const bool processTransforms = prevFrame.matched;
+        // Same requirement as processProjections above. TransformProcessor is what
+        // fills lerpWorldTransforms, invTWorldTransforms and prevWorldTransforms
+        // (rt64_transform_processor.cpp:27-58) and uploads the two buffers the vertex
+        // processor binds to produce world-space positions
+        // (rt64_vertex_processor.cpp:34-35) - and those positions are exactly what the
+        // BLAS is built from (rt64_framebuffer_renderer.cpp:1595).
+        const bool processTransforms = prevFrame.matched || workloadConfig.raytracingEnabled;
         bool uploadTransforms = false;
         if (processTransforms) {
             TransformProcessor::ProcessParams transformParams;
@@ -387,7 +408,12 @@ namespace RT64 {
                 rspProcessor->process(rspParams);
             }
 
-            const bool processWorldVertices = prevFrame.matched;
+            // The last of the three. This one runs the compute pass that writes
+            // worldPosBuffer, which the acceleration structures are built from
+            // (rt64_framebuffer_renderer.cpp:1595); without it they would be built over
+            // whatever the buffer last held. Interpolation and raytracing want the same
+            // world-space data for different reasons.
+            const bool processWorldVertices = prevFrame.matched || workloadConfig.raytracingEnabled;
             if (processWorldVertices) {
                 workload.resetWorldOutputBuffers();
 

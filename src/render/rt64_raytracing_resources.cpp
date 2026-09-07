@@ -7,8 +7,108 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <cstdlib>
+
+#ifdef _WIN32
+#   include <d3d12.h>
+#   include "plume_d3d12.h"
+#endif
 
 namespace RT64 {
+#ifdef _WIN32
+    // A removed device turns every later call into a failure that reports nothing useful:
+    // buffer creation returns an object whose resource is null, and the next map() faults.
+    // The first sign of it in this path was a crash three calls downstream of the actual
+    // cause, so the state is checked before the RT work each frame and reported once.
+    //
+    // Reaching the D3D12 device does not mean editing plume: D3D12Device is a public type
+    // in plume_d3d12.h with its ID3D12Device8 in the open.
+    //
+    // DRED is what makes the report worth having. Without it a removal says only
+    // DXGI_ERROR_DEVICE_HUNG or _REMOVED; with it the breadcrumbs name the last GPU
+    // operations that completed, so a fault inside an acceleration structure build looks
+    // different from one inside a dispatch.
+    static bool reportDeviceRemoval(RenderDevice *device, UserConfiguration::GraphicsAPI graphicsAPI, const char *where) {
+        if (graphicsAPI != UserConfiguration::GraphicsAPI::D3D12) {
+            return false;
+        }
+
+        plume::D3D12Device *d3d12Device = static_cast<plume::D3D12Device *>(device);
+        if ((d3d12Device == nullptr) || (d3d12Device->d3d == nullptr)) {
+            return false;
+        }
+
+        const HRESULT reason = d3d12Device->d3d->GetDeviceRemovedReason();
+        if (SUCCEEDED(reason)) {
+            return false;
+        }
+
+        static bool reported = false;
+        if (reported) {
+            return true;
+        }
+
+        reported = true;
+        fprintf(stderr, "rt64: the D3D12 device was removed before %s, reason 0x%08lX\n", where, (unsigned long)reason);
+
+        ID3D12DeviceRemovedExtendedData1 *dred = nullptr;
+        if (FAILED(d3d12Device->d3d->QueryInterface(IID_PPV_ARGS(&dred)))) {
+            fprintf(stderr, "rt64: no DRED available; set PDRT64_RT_DRED=1 before launching to turn it on\n");
+            fflush(stderr);
+            return true;
+        }
+
+        uint32_t nodeCount = 0;
+        uint32_t incompleteCount = 0;
+        D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 breadcrumbs = {};
+        if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&breadcrumbs))) {
+            for (const D3D12_AUTO_BREADCRUMB_NODE1 *node = breadcrumbs.pHeadAutoBreadcrumbNode; node != nullptr; node = node->pNext) {
+                nodeCount++;
+                const uint32_t done = (node->pLastBreadcrumbValue != nullptr) ? *node->pLastBreadcrumbValue : 0;
+                if (done >= node->BreadcrumbCount) {
+                    // Everything this list recorded finished, so it is not the one that died.
+                    continue;
+                }
+
+                fprintf(stderr, "rt64: DRED - command list '%ls' stopped at operation %u of %u\n",
+                    (node->pCommandListDebugNameW != nullptr) ? node->pCommandListDebugNameW : L"(unnamed)",
+                    done, node->BreadcrumbCount);
+
+                // The operation it stopped on is the one that faulted, and the few before it
+                // are the context that makes it readable.
+                const uint32_t first = (done > 4) ? (done - 4) : 0;
+                for (uint32_t i = first; (i <= done) && (i < node->BreadcrumbCount); i++) {
+                    fprintf(stderr, "rt64: DRED -   [%u] op %d%s\n", i, int(node->pCommandHistory[i]), (i == done) ? "  <-- faulted here" : "");
+                }
+
+                incompleteCount++;
+            }
+
+            // Never silent. Every list having finished points at a timeout rather than a
+            // fault, and those are different problems with different fixes.
+            fprintf(stderr, "rt64: DRED - %u command lists recorded, %u unfinished%s\n", nodeCount, incompleteCount,
+                ((nodeCount > 0) && (incompleteCount == 0)) ? " (all completed - looks like a timeout, not a fault)" : "");
+        }
+        else {
+            fprintf(stderr, "rt64: DRED - no breadcrumbs were captured\n");
+        }
+
+        D3D12_DRED_PAGE_FAULT_OUTPUT1 pageFault = {};
+        if (SUCCEEDED(dred->GetPageFaultAllocationOutput1(&pageFault))) {
+            fprintf(stderr, "rt64: DRED - page fault at GPU address 0x%llX\n", (unsigned long long)pageFault.PageFaultVA);
+            for (const D3D12_DRED_ALLOCATION_NODE1 *node = pageFault.pHeadRecentFreedAllocationNode; node != nullptr; node = node->pNext) {
+                fprintf(stderr, "rt64: DRED -   recently freed: '%ls'\n", (node->ObjectNameW != nullptr) ? node->ObjectNameW : L"(unnamed)");
+            }
+        }
+
+        dred->Release();
+        fflush(stderr);
+        return true;
+    }
+#else
+    static bool reportDeviceRemoval(RenderDevice *, UserConfiguration::GraphicsAPI, const char *) { return false; }
+#endif
+
     static uint64_t roundUp(uint64_t value, uint64_t powerOf2Alignment) {
         return (value + powerOf2Alignment - 1) & ~(powerOf2Alignment - 1);
     }
@@ -83,16 +183,23 @@ namespace RT64 {
     void RaytracingResources::updateBottomLevelASResources(RenderWorker *worker) {
         assert(worker != nullptr);
 
+        if (reportDeviceRemoval(worker->device, graphicsAPI, "the bottom level acceleration structures")) {
+            return;
+        }
+
         for (BottomLevelAS &blas : bottomLevelASVector) {
             if (blas.meshes.empty()) {
                 continue;
             }
 
-            // preferFastTrace over preferFastBuild: each structure is traced several times
-            // per frame - primary, direct, indirect, refraction and one pass per reflection
-            // (rt64_framebuffer_renderer.cpp:815-862) - against a single build, so trace
-            // cost dominates.
-            worker->device->setBottomLevelASBuildInfo(blas.buildInfo, blas.meshes.data(), uint32_t(blas.meshes.size()), false, true);
+            // preferFastBuild, not preferFastTrace. An earlier version chose fast trace on
+            // the grounds that each structure is traced five or more times per frame
+            // against a single build (rt64_framebuffer_renderer.cpp:815-862). That
+            // reasoning ignored the other half: the build also happens every frame,
+            // because the vertices are rewritten every frame, and there is one of these
+            // per draw call. Fast trace is for geometry built once and traced for many
+            // frames; fully dynamic geometry is the case fast build exists for.
+            worker->device->setBottomLevelASBuildInfo(blas.buildInfo, blas.meshes.data(), uint32_t(blas.meshes.size()), true, false);
 
             const uint64_t bufferSize = allocationForSize(blas.buildInfo.accelerationStructureSize);
             const bool bufferChanged = ensureBuffer(worker->device, blas.buffer, blas.bufferSize, blas.buildInfo.accelerationStructureSize, RenderBufferDesc::AccelerationStructureBuffer(bufferSize));
@@ -109,6 +216,26 @@ namespace RT64 {
 
     void RaytracingResources::submitBottomLevelASCreation(RenderWorker *worker) {
         assert(worker != nullptr);
+
+        // Once. One structure is built per RT draw call, every frame, so this number is
+        // the shape of the per-frame acceleration structure cost - and the first thing
+        // worth knowing when the GPU hangs rather than faults.
+        static bool reportedBuildCount = false;
+        if (!reportedBuildCount && !bottomLevelASVector.empty()) {
+            reportedBuildCount = true;
+            uint64_t totalTriangles = 0;
+            uint64_t totalScratch = 0;
+            for (const BottomLevelAS &blas : bottomLevelASVector) {
+                for (const RenderBottomLevelASMesh &mesh : blas.meshes) {
+                    totalTriangles += mesh.indexCount / 3;
+                }
+                totalScratch += blas.scratchSize;
+            }
+
+            fprintf(stdout, "rt64: building %zu bottom level structures, %llu triangles, %llu KB scratch\n",
+                bottomLevelASVector.size(), (unsigned long long)totalTriangles, (unsigned long long)(totalScratch / 1024));
+            fflush(stdout);
+        }
 
         thread_local std::vector<RenderBufferBarrier> afterBuildBarriers;
         afterBuildBarriers.clear();
@@ -138,6 +265,10 @@ namespace RT64 {
         // same walk, so they are parallel lists. Anything else means the walk changed and
         // the mapping below stopped being meaningful.
         assert(instanceIndices.size() == bottomLevelASVector.size());
+
+        if (reportDeviceRemoval(worker->device, graphicsAPI, "the top level acceleration structure")) {
+            return;
+        }
 
         topLevelASInstances.clear();
         topLevelASInstances.reserve(instanceIndices.size());
@@ -255,6 +386,13 @@ namespace RT64 {
         textureWidth = uint32_t(width);
         textureHeight = uint32_t(height);
 
+        {
+            const uint64_t queries = uint64_t(textureWidth) * textureHeight * MaxHitQueries;
+            fprintf(stdout, "rt64: creating output buffers at %ux%u, %llu hit queries, %llu MB of hit buffers\n",
+                textureWidth, textureHeight, (unsigned long long)queries, (unsigned long long)((queries * 30) / (1024 * 1024)));
+            fflush(stdout);
+        }
+
         // World position needs full float precision; everything else that carries colour or
         // a normal is fine at half.
         const RenderFormat HDR = RenderFormat::R16G16B16A16_FLOAT;
@@ -303,17 +441,25 @@ namespace RT64 {
         upscaledOutputTexture = createStorageTexture(device, textureWidth, textureHeight, HDR);
 
         const uint32_t hitBufferPixelCount = textureWidth * textureHeight * MaxHitQueries;
-        hitVelocityDistanceBuffer = device->createBuffer(RenderBufferDesc::DefaultBuffer(uint64_t(hitBufferPixelCount) * 16, RenderBufferFlag::STORAGE | RenderBufferFlag::FORMATTED));
-        hitColorBuffer = device->createBuffer(RenderBufferDesc::DefaultBuffer(uint64_t(hitBufferPixelCount) * 4, RenderBufferFlag::STORAGE | RenderBufferFlag::FORMATTED));
-        hitNormalFogBuffer = device->createBuffer(RenderBufferDesc::DefaultBuffer(uint64_t(hitBufferPixelCount) * 8, RenderBufferFlag::STORAGE | RenderBufferFlag::FORMATTED));
-        hitInstanceIdBuffer = device->createBuffer(RenderBufferDesc::DefaultBuffer(uint64_t(hitBufferPixelCount) * 2, RenderBufferFlag::STORAGE | RenderBufferFlag::FORMATTED));
+        // UNORDERED_ACCESS as well as STORAGE, and the distinction is not cosmetic. They
+        // are separate flags (contrib/plume/plume_render_interface_types.h:414-424) and only
+        // UNORDERED_ACCESS reaches the mask that sets
+        // D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS (plume_d3d12.cpp:2740). All four are
+        // bound as RWBuffers (shaders/FbRendererRT.hlsli:30-33), so a UAV is created over
+        // them, and creating one over a resource that does not allow it removes the device.
+        // RT64's own buffer helper spells both out for this reason (rt64_workload.cpp:233).
+        const RenderBufferFlags HitBufferFlags = RenderBufferFlag::STORAGE | RenderBufferFlag::FORMATTED | RenderBufferFlag::UNORDERED_ACCESS;
+        hitVelocityDistanceBuffer = device->createBuffer(RenderBufferDesc::DefaultBuffer(uint64_t(hitBufferPixelCount) * 16, HitBufferFlags));
+        hitColorBuffer = device->createBuffer(RenderBufferDesc::DefaultBuffer(uint64_t(hitBufferPixelCount) * 4, HitBufferFlags));
+        hitNormalFogBuffer = device->createBuffer(RenderBufferDesc::DefaultBuffer(uint64_t(hitBufferPixelCount) * 8, HitBufferFlags));
+        hitInstanceIdBuffer = device->createBuffer(RenderBufferDesc::DefaultBuffer(uint64_t(hitBufferPixelCount) * 2, HitBufferFlags));
         hitVelocityDistanceBufferView = hitVelocityDistanceBuffer->createBufferFormattedView(RenderFormat::R32G32B32A32_FLOAT);
         hitColorBufferView = hitColorBuffer->createBufferFormattedView(RenderFormat::R8G8B8A8_UNORM);
         hitNormalFogBufferView = hitNormalFogBuffer->createBufferFormattedView(RenderFormat::R16G16B16A16_FLOAT);
         hitInstanceIdBufferView = hitInstanceIdBuffer->createBufferFormattedView(RenderFormat::R16_UINT);
 
         if (luminanceHistogramBuffer == nullptr) {
-            luminanceHistogramBuffer = device->createBuffer(RenderBufferDesc::DefaultBuffer(HistogramBins * sizeof(uint32_t), RenderBufferFlag::STORAGE));
+            luminanceHistogramBuffer = device->createBuffer(RenderBufferDesc::DefaultBuffer(HistogramBins * sizeof(uint32_t), RenderBufferFlag::STORAGE | RenderBufferFlag::UNORDERED_ACCESS));
         }
 
         rtParams.resolution = { float(textureWidth), float(textureHeight), 1.0f / float(textureWidth), 1.0f / float(textureHeight) };
@@ -325,6 +471,8 @@ namespace RT64 {
 
         // Nothing accumulated at the previous size can be reprojected into the new one.
         skipReprojection = true;
+
+        reportDeviceRemoval(device, graphicsAPI, "the output buffers were created");
     }
 
     void RaytracingResources::updateInterleavedRenderTargets(RenderWorker *worker, int width, int height, uint32_t targetCount, const RenderMultisampling &multisampling, bool usesHDR) {
@@ -362,6 +510,8 @@ namespace RT64 {
             framebufferKey.modifierKey = i;
             interleavedFramebufferStorageVector[i]->setup(worker->device, framebufferKey, colorTarget, depthTarget);
         }
+
+        reportDeviceRemoval(worker->device, graphicsAPI, "the interleaved render targets were set up");
     }
 
     void RaytracingResources::updateMultisampling() {
@@ -439,6 +589,8 @@ namespace RT64 {
         postProcessSet->setTexture(postProcessSet->gInput, postProcessInput, RenderTextureLayout::SHADER_READ);
         postProcessSet->setTexture(postProcessSet->gFlow, flowTexture.get(), RenderTextureLayout::SHADER_READ);
         postProcessSet->setTexture(postProcessSet->gLumaAvg, lumaAverageTexture.get(), RenderTextureLayout::SHADER_READ);
+
+        reportDeviceRemoval(device, graphicsAPI, "the shader descriptor sets were updated");
     }
 
     void RaytracingResources::updateLightsBuffer(RenderWorker *worker, const RaytracingScene &rtScene) {
