@@ -2,6 +2,8 @@
 // RT64
 //
 
+#include <cstdlib>
+
 #include "rt64_framebuffer_renderer.h"
 
 #include "../include/rt64_extended_gbi.h"
@@ -50,6 +52,38 @@ namespace interop {
 };
 
 namespace RT64 {
+#if RT_ENABLED
+    // Bisection aid. PDRT64_RT_STAGES is a bitmask of the raytracing frame graph stages
+    // to run, all on by default. It exists because a device that dies with no validation
+    // errors and no breadcrumbs leaves nothing to read, and turning stages off one at a
+    // time is the only way left to find out which one is responsible.
+    enum RtStage : uint32_t {
+        RtStagePrimary = 1u << 0,
+        RtStageShading = 1u << 1,   // direct, indirect, refraction, reflection
+        RtStageFilter = 1u << 2,
+        RtStageCompose = 1u << 3,
+        RtStageLuma = 1u << 4,
+        RtStagePost = 1u << 5,
+        RtStageBindRoot = 1u << 6,  // the root signature and descriptor sets bound before traceRays
+        RtStageAll = 0xFFFFFFFFu
+    };
+
+    static uint32_t rtStageMask() {
+        static const uint32_t mask = []() {
+            const char *env = getenv("PDRT64_RT_STAGES");
+            if (env == nullptr) {
+                return uint32_t(RtStageAll);
+            }
+
+            const uint32_t parsed = uint32_t(strtoul(env, nullptr, 0));
+            fprintf(stdout, "rt64: raytracing stage mask 0x%X\n", parsed);
+            fflush(stdout);
+            return parsed;
+        }();
+        return mask;
+    }
+#endif
+
     // Helper functions.
     
     RenderRect convertFixedRect(FixedRect rect, hlslpp::float2 resScale, int32_t fbWidth, float aspectRatioScale, float extOriginPercentage, int32_t horizontalMisalignment, uint16_t leftOrigin, uint16_t rightOrigin) {
@@ -835,19 +869,28 @@ namespace RT64 {
 
         worker->commandList->barriers(RenderBarrierStage::COMPUTE, preDispatchBarriers, uint32_t(std::size(preDispatchBarriers)));
         
-        // Bind pipeline and dispatch primary rays.
-        RT64_LOG_PRINTF("Dispatching primary rays");
+        // These two are used again by the debug draw at the end, so they stay outside
+        // the stage gate.
         Framebuffer &framebuffer = framebufferVector[framebufferCount - 1];
         RenderDescriptorSet *descRealFbSet = framebuffer.descRealFbSet->get();
+
+        if (rtStageMask() & RtStagePrimary) {
+        // Bind pipeline and dispatch primary rays.
+        RT64_LOG_PRINTF("Dispatching primary rays");
         rtResources->shaderBindingTableInfo.groups.rayGen.startIndex = 0;
         worker->commandList->setPipeline(rtState->pipeline.get());
-        worker->commandList->setRaytracingPipelineLayout(rtPipelineLayout);
-        worker->commandList->setRaytracingDescriptorSet(descCommonSet->get(), 0);
-        worker->commandList->setRaytracingDescriptorSet(descTextureSet->get(), 1);
-        worker->commandList->setRaytracingDescriptorSet(descTextureSet->get(), 2);
-        worker->commandList->setRaytracingDescriptorSet(descRealFbSet, 3);
+        if (rtStageMask() & RtStageBindRoot) {
+            worker->commandList->setRaytracingPipelineLayout(rtPipelineLayout);
+            worker->commandList->setRaytracingDescriptorSet(descCommonSet->get(), 0);
+            worker->commandList->setRaytracingDescriptorSet(descTextureSet->get(), 1);
+            worker->commandList->setRaytracingDescriptorSet(descTextureSet->get(), 2);
+            worker->commandList->setRaytracingDescriptorSet(descRealFbSet, 3);
+        }
         worker->commandList->traceRays(rtResources->textureWidth, rtResources->textureHeight, 1, rtResources->shaderBindingTableBuffer->at(0), rtResources->shaderBindingTableInfo.groups);
+        }
 
+
+        if (rtStageMask() & RtStageShading) {
         // Barriers for shading buffers before dispatching secondary rays.
         RenderTextureBarrier shadingBarriers[] = {
             RenderTextureBarrier(rtResources->instanceIdTexture.get(), RenderTextureLayout::GENERAL),
@@ -907,6 +950,8 @@ namespace RT64 {
 
                 worker->commandList->barriers(RenderBarrierStage::COMPUTE, newInputBarriers, uint32_t(std::size(newInputBarriers)));
             }
+        }
+
         }
 
         // Copy direct light raw buffer to the first direct filtered buffer.

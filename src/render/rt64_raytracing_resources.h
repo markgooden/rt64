@@ -91,6 +91,12 @@ namespace RT64 {
         // (shaders/LuminanceHistogramCS.hlsl:10, shaders/HistogramAverageCS.hlsl:11).
         static const uint32_t HistogramBins = 64;
 
+        // Slots for the per-frame upload buffers below. Matches WORKLOAD_QUEUE_SIZE, which
+        // is how many frames the workload queue keeps in flight (rt64_workload_queue.h:20);
+        // spelled out rather than included because that header includes this one.
+        static const uint32_t FrameSlots = 4;
+        uint32_t frameSlot = 0;
+
         // One BLAS and the buffers backing it. The draw-call walk adds one of these per RT
         // draw call, so the k-th entry corresponds to the k-th index in the scene's
         // instanceIndices — see updateTopLevelASResources.
@@ -120,19 +126,32 @@ namespace RT64 {
         std::unique_ptr<RenderAccelerationStructure> topLevelAS;
         std::unique_ptr<RenderBuffer> topLevelASBuffer;
         std::unique_ptr<RenderBuffer> topLevelASScratchBuffer;
-        std::unique_ptr<RenderBuffer> topLevelASInstancesBuffer;
+        std::unique_ptr<RenderBuffer> topLevelASInstancesSlots[FrameSlots];
+        uint64_t topLevelASInstancesSlotSizes[FrameSlots] = {};
+        RenderBuffer *topLevelASInstancesBuffer = nullptr;
         RenderTopLevelASBuildInfo topLevelASBuildInfo;
         std::vector<RenderTopLevelASInstance> topLevelASInstances;
         uint64_t topLevelASBufferSize = 0;
         uint64_t topLevelASScratchSize = 0;
-        uint64_t topLevelASInstancesSize = 0;
 
         // Shader binding table. The frame graph rewrites groups.rayGen.startIndex between
         // dispatches to select which ray generation program runs
         // (rt64_framebuffer_renderer.cpp:808, 833, 838, 848, 861).
-        std::unique_ptr<RenderBuffer> shaderBindingTableBuffer;
+        // One slot per frame that can be in flight, rotated by resetBottomLevelAS.
+        // The binding table and the top level instance descriptors are written by the
+        // CPU and read by the GPU during the same frame, so overwriting either while an
+        // earlier frame is still reading it hands the ray dispatch garbage shader
+        // identifiers. Nothing validates that - the writes go through a mapped upload
+        // buffer, which no API call sees - and it presents as a driver internal error a
+        // few frames later.
+        std::unique_ptr<RenderBuffer> shaderBindingTableSlots[FrameSlots];
+        uint64_t shaderBindingTableSlotSizes[FrameSlots] = {};
+
+        // Points at this frame's slot. The frame graph dereferences it directly
+        // (rt64_framebuffer_renderer.cpp:883 and the dispatches after it), so it stays a
+        // plain pointer with the same spelling it had when there was only one buffer.
+        RenderBuffer *shaderBindingTableBuffer = nullptr;
         RenderShaderBindingTableInfo shaderBindingTableInfo;
-        uint64_t shaderBindingTableSize = 0;
 
         // Ray generation inputs and the shading G-buffer.
         std::unique_ptr<RenderTexture> viewDirectionTexture;

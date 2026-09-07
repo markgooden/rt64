@@ -208,6 +208,10 @@ namespace RT64 {
     // static geometry to refit against.
 
     void RaytracingResources::resetBottomLevelAS() {
+        // Once per frame. Everything the CPU writes and the GPU reads within a frame moves
+        // to a different slot here, so a frame still in flight is never overwritten.
+        frameSlot = (frameSlot + 1) % FrameSlots;
+
         // Retire this frame's entries into the pool rather than destroying them, so their
         // buffers survive into the next frame and get reused at the same sizes. The vector
         // itself must end up empty, because the frame graph tests it to decide whether an
@@ -400,7 +404,9 @@ namespace RT64 {
         // staged, because the data is small and rewritten in full every frame.
         const uint64_t instancesSize = uint64_t(topLevelASBuildInfo.instancesBufferData.size());
         if (instancesSize > 0) {
-            ensureBuffer(worker->device, topLevelASInstancesBuffer, topLevelASInstancesSize, instancesSize, RenderBufferDesc::UploadBuffer(allocationForSize(instancesSize), RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT));
+            ensureBuffer(worker->device, topLevelASInstancesSlots[frameSlot], topLevelASInstancesSlotSizes[frameSlot], instancesSize,
+                RenderBufferDesc::UploadBuffer(allocationForSize(instancesSize), RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT));
+            topLevelASInstancesBuffer = topLevelASInstancesSlots[frameSlot].get();
 
             const RenderRange writtenRange(0, instancesSize);
             void *dstData = topLevelASInstancesBuffer->map();
@@ -449,10 +455,9 @@ namespace RT64 {
             return;
         }
 
-        if ((shaderBindingTableBuffer == nullptr) || (shaderBindingTableSize < tableSize)) {
-            shaderBindingTableSize = allocationForSize(tableSize);
-            shaderBindingTableBuffer = worker->device->createBuffer(RenderBufferDesc::UploadBuffer(shaderBindingTableSize, RenderBufferFlag::SHADER_BINDING_TABLE));
-        }
+        ensureBuffer(worker->device, shaderBindingTableSlots[frameSlot], shaderBindingTableSlotSizes[frameSlot], tableSize,
+            RenderBufferDesc::UploadBuffer(allocationForSize(tableSize), RenderBufferFlag::SHADER_BINDING_TABLE));
+        shaderBindingTableBuffer = shaderBindingTableSlots[frameSlot].get();
 
         const RenderRange writtenRange(0, tableSize);
         void *dstData = shaderBindingTableBuffer->map();
