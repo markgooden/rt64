@@ -756,6 +756,21 @@ namespace RT64 {
     }
     
     void FramebufferRenderer::submitRaytracingScene(RenderWorker *worker, RenderTarget *colorTarget, const RaytracingScene &rtScene) {
+        // Once, on the first frame that actually traces. Whether a frame reaches this
+        // at all is the first question worth answering when the path tracer appears to
+        // do nothing, and it is not otherwise observable from outside: enabling
+        // raytracing only makes a scene eligible, and a frame with no perspective
+        // projection that writes depth produces no RaytracingScene at all
+        // (rt64_framebuffer_renderer.cpp:1462-1463).
+        static bool reportedFirstTrace = false;
+        if (!reportedFirstTrace) {
+            reportedFirstTrace = true;
+            fprintf(stdout, "rt64: tracing - %zu instances, %u interleaved rasters, %ux%u\n",
+                rtScene.instanceIndices.size(), interleavedRastersCount,
+                rtResources->textureWidth, rtResources->textureHeight);
+            fflush(stdout);
+        }
+
         // Unbind any render targets.
         worker->commandList->setFramebuffer(nullptr);
 
@@ -1780,6 +1795,19 @@ namespace RT64 {
                     chosenFramebuffer = &framebufferVector[i];
                     chosenRtScene = &targetDrawCall.rtScenes[0];
                 }
+            }
+
+            // Once, if raytracing is on and yet nothing became traceable. Enabling
+            // raytracing only makes a scene eligible: it still needs a perspective
+            // projection that writes depth (:1462-1463), so a frame of menus or
+            // full-screen rects legitimately produces none, and "the path tracer does
+            // nothing" otherwise looks identical to a defect.
+            static bool reportedNoScene = false;
+            if ((chosenRtScene == nullptr) && !reportedNoScene) {
+                reportedNoScene = true;
+                fprintf(stdout, "rt64: raytracing is enabled but no scene was traceable in this frame "
+                    "(%u framebuffers, no perspective projection writing depth)\n", framebufferCount);
+                fflush(stdout);
             }
         }
 

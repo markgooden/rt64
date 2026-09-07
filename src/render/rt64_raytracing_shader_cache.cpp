@@ -91,7 +91,25 @@ namespace RT64 {
         FramebufferRendererDescriptorTextureSet descriptorTextureSet;
         FramebufferRendererDescriptorFramebufferSet descriptorFramebufferSet;
         RenderPipelineLayoutBuilder layoutBuilder;
-        layoutBuilder.begin(false, true);
+
+        // begin(isLocal, allowInputLayout).
+        //
+        // isLocal=true because that is the role plume gives this layout. It is
+        // attached to the state object as D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE
+        // and associated with every export (contrib/plume/plume_d3d12.cpp:3348-3358);
+        // the global root signature is a dummy plume creates itself (:3360-3363).
+        // The reason is visible in setShaderBindingTableInfo, which writes one
+        // descriptor table handle per root parameter into every shader record
+        // (:4066, :4083-4093) - the bindings travel in the binding table, which is
+        // what a local root signature means. D3D12 rejects a state object whose
+        // local root signature was not created with
+        // D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE, which is the E_INVALIDARG
+        // this cost.
+        //
+        // allowInputLayout=false. The raster path passes true
+        // (rt64_raster_shader.cpp:451) because it has a vertex layout; ray tracing
+        // has no input assembler, and D3D12 rejects that flag here too.
+        layoutBuilder.begin(true, false);
         layoutBuilder.addDescriptorSet(descriptorCommonSet);
         layoutBuilder.addDescriptorSet(descriptorTextureSet);
         layoutBuilder.addDescriptorSet(descriptorTextureSet);
@@ -142,11 +160,23 @@ namespace RT64 {
         states.resize(StateCount);
         for (RaytracingState &state : states) {
             state.pipeline = device->createRaytracingPipeline(pipelineDesc);
-            if (state.pipeline == nullptr) {
-                assert(false && "Failed to create the raytracing pipeline.");
-                return;
-            }
 
+            // There is deliberately no null check here, because there is nothing to
+            // check: createRaytracingPipeline always returns a non-null object
+            // (contrib/plume/plume_d3d12.cpp:3916-3918), and a failed
+            // CreateStateObject leaves that object with a null state object and an
+            // empty program map, having only printed to stderr. getProgram then
+            // dereferences an end() iterator (:3439-3442) with its assert compiled
+            // out of a release build, which is undefined behaviour rather than an
+            // error anyone can act on.
+            //
+            // An earlier version of this loop did check for null, which read as
+            // defensive and was in fact dead code - it is what let an invalid
+            // pipeline layout reach traceRays and crash. plume needs a way to
+            // report this; that is an upstream proposal, not something to work
+            // around in the fork by editing contrib. Until then the only real
+            // defence is not to hand plume a descriptor it will reject, so the
+            // layout above is built to the rules the state object imposes.
             RaytracingShaderPrograms programs;
             programs.surface = state.pipeline->getProgram(SurfaceHitGroupName);
             programs.shadow = state.pipeline->getProgram(ShadowHitGroupName);
