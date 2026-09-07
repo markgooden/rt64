@@ -16,6 +16,56 @@
 
 namespace RT64 {
 #ifdef _WIN32
+    // Drains the debug layer's message queue into our own log. The messages otherwise go
+    // to the debugger output, where a run launched from a script never sees them - and an
+    // invalid call is what precedes nearly every removed device, so it is the one thing
+    // worth having that DRED has not provided here.
+    //
+    // Silent unless the debug layer is on, since the info queue does not exist otherwise.
+    static void drainDebugMessages(RenderDevice *device, UserConfiguration::GraphicsAPI graphicsAPI) {
+        if (graphicsAPI != UserConfiguration::GraphicsAPI::D3D12) {
+            return;
+        }
+
+        plume::D3D12Device *d3d12Device = static_cast<plume::D3D12Device *>(device);
+        if ((d3d12Device == nullptr) || (d3d12Device->d3d == nullptr)) {
+            return;
+        }
+
+        ID3D12InfoQueue *infoQueue = nullptr;
+        if (FAILED(d3d12Device->d3d->QueryInterface(IID_PPV_ARGS(&infoQueue)))) {
+            return;
+        }
+
+        const UINT64 count = infoQueue->GetNumStoredMessages();
+        for (UINT64 i = 0; i < count; i++) {
+            SIZE_T length = 0;
+            if (FAILED(infoQueue->GetMessage(i, nullptr, &length)) || (length == 0)) {
+                continue;
+            }
+
+            std::vector<uint8_t> storage(length);
+            D3D12_MESSAGE *message = reinterpret_cast<D3D12_MESSAGE *>(storage.data());
+            if (FAILED(infoQueue->GetMessage(i, message, &length))) {
+                continue;
+            }
+
+            // Warnings and below are noise from the raster path; errors are what matter.
+            if (message->Severity <= D3D12_MESSAGE_SEVERITY_ERROR) {
+                fprintf(stderr, "rt64: D3D12 %s - %.*s\n",
+                    (message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION) ? "CORRUPTION" : "ERROR",
+                    int(message->DescriptionByteLength), message->pDescription);
+            }
+        }
+
+        if (count > 0) {
+            infoQueue->ClearStoredMessages();
+            fflush(stderr);
+        }
+
+        infoQueue->Release();
+    }
+
     // A removed device turns every later call into a failure that reports nothing useful:
     // buffer creation returns an object whose resource is null, and the next map() faults.
     // The first sign of it in this path was a crash three calls downstream of the actual
@@ -106,6 +156,7 @@ namespace RT64 {
         return true;
     }
 #else
+    static void drainDebugMessages(RenderDevice *, UserConfiguration::GraphicsAPI) { }
     static bool reportDeviceRemoval(RenderDevice *, UserConfiguration::GraphicsAPI, const char *) { return false; }
 #endif
 
@@ -182,6 +233,8 @@ namespace RT64 {
 
     void RaytracingResources::updateBottomLevelASResources(RenderWorker *worker) {
         assert(worker != nullptr);
+
+        drainDebugMessages(worker->device, graphicsAPI);
 
         if (reportDeviceRemoval(worker->device, graphicsAPI, "the bottom level acceleration structures")) {
             return;
@@ -459,8 +512,13 @@ namespace RT64 {
             depthTexture[i] = createStorageTexture(device, textureWidth, textureHeight, RenderFormat::R32_FLOAT);
 
             // The compose pass draws into these, so they are render targets as well as
-            // sampled inputs to post-process.
-            outputTexture[i] = device->createTexture(RenderTextureDesc::ColorTarget(textureWidth, textureHeight, HDR));
+            // sampled inputs to post-process - and their format is not a free choice. The
+            // compose pipeline declares R32G32B32A32_FLOAT for render target 0
+            // (rt64_shader_library.cpp:297), and D3D12 rejects a draw whose render target
+            // format differs from the pipeline's. This was HDR like everything else here,
+            // which the debug layer reported as "the render target format in slot 0 does
+            // not match that specified by the current pipeline state" on every compose.
+            outputTexture[i] = device->createTexture(RenderTextureDesc::ColorTarget(textureWidth, textureHeight, RenderFormat::R32G32B32A32_FLOAT));
 
             const RenderTexture *colorAttachment = outputTexture[i].get();
             outputFramebuffer[i] = device->createFramebuffer(RenderFramebufferDesc(&colorAttachment, 1));
