@@ -411,6 +411,52 @@ namespace RT64 {
 #   endif
 
         descCommonSet->setBuffer(descCommonSet->FrParams, frameParamsBuffer.get(), sizeof(interop::FrameParams));
+#   if RT_ENABLED
+        // PDRT64_RT_NAMEBUFFERS: give every buffer bound here a debug name.
+        //
+        // D3D12 GPU-based validation names the offending resource, but plume creates buffers
+        // without debug names, so it reports 'Unnamed ID3D12Resource Object' and the message
+        // cannot be tied back to a binding. With this on it says which one, which is how the
+        // structured buffer stride mismatch was traced to normalColorBuffer - a buffer only
+        // the compute sets bind, being read by a pixel shader as a 20 byte struct.
+        //
+        // Off by default: it re-applies every frame, because the buffer pairs are recreated
+        // whenever they grow, and that is not free.
+        static const bool nameBuffers = (getenv("PDRT64_RT_NAMEBUFFERS") != nullptr);
+        if (raytracingEnabled && nameBuffers) {
+            const struct { const char *name; const RenderBuffer *buffer; } commonBuffers[] = {
+                { "instanceRDPParams", drawBuffers->rdpParamsBuffer.get() },
+                { "RDPTiles", drawBuffers->rdpTilesBuffer.get() },
+                { "GPUTiles", drawBuffers->gpuTilesBuffer.get() },
+                { "instanceRenderIndices", renderIndicesBuffer.get() },
+                { "DynamicRenderParams", drawBuffers->renderParamsBuffer.get() },
+                { "RSPFogVector", drawBuffers->rspFogBuffer.get() },
+                { "RSPLightVector", drawBuffers->rspLightsBuffer.get() },
+                { "instanceExtraParams", drawBuffers->extraParamsBuffer.get() },
+                { "indexBuffer", drawBuffers->faceIndicesBuffer.get() },
+                { "srcFogIndices", drawBuffers->fogIndicesBuffer.get() },
+                { "srcLightIndices", drawBuffers->lightIndicesBuffer.get() },
+                { "srcLightCounts", drawBuffers->lightCountsBuffer.get() },
+                { "posBuffer", outputBuffers->worldPosBuffer.buffer.get() },
+                { "normBuffer", outputBuffers->worldNormBuffer.buffer.get() },
+                { "velBuffer", outputBuffers->worldVelBuffer.buffer.get() },
+                { "genTexCoordBuffer", outputBuffers->genTexCoordBuffer.buffer.get() },
+                { "shadedColBuffer", outputBuffers->shadedColBuffer.buffer.get() },
+                { "SceneLights", rtResources->lightsBuffer.get() },
+                { "interleavedRasters", interleavedRastersBuffer.get() },
+                { "rtParamsBuffer", rtResources->rtParamsBuffer.get() },
+                { "screenPosBuffer", outputBuffers->screenPosBuffer.buffer.get() },
+                { "testZIndexBuffer", outputBuffers->testZIndexBuffer.buffer.get() },
+                { "normalColorBuffer", drawBuffers->normalColorBuffer.get() }
+            };
+
+            for (const auto &entry : commonBuffers) {
+                if (entry.buffer != nullptr) {
+                    const_cast<RenderBuffer *>(entry.buffer)->setName(entry.name);
+                }
+            }
+        }
+#   endif
         descCommonSet->setBuffer(descCommonSet->instanceRenderIndices, renderIndicesBuffer.get(), RenderBufferStructuredView(sizeof(interop::RenderIndices)));
         descCommonSet->setBuffer(descCommonSet->instanceRDPParams, drawBuffers->rdpParamsBuffer.get(), RenderBufferStructuredView(sizeof(interop::RDPParams)));
         descCommonSet->setBuffer(descCommonSet->RDPTiles, drawBuffers->rdpTilesBuffer.get(), RenderBufferStructuredView(sizeof(interop::RDPTile)));
