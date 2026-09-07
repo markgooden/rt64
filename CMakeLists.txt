@@ -420,6 +420,12 @@ set (SOURCES
     "${PROJECT_SOURCE_DIR}/src/contrib/miniz/miniz.c"
 )
 
+if (RT64_RAYTRACING)
+    list(APPEND SOURCES
+        "${PROJECT_SOURCE_DIR}/src/render/rt64_raytracing_resources.cpp"
+    )
+endif()
+
 include_directories(
     "${SDL2_INCLUDE_DIRS}"
     "${PROJECT_SOURCE_DIR}/src"

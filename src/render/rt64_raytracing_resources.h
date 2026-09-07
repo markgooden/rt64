@@ -78,13 +78,18 @@ namespace RT64 {
         // (rt64_framebuffer_renderer.cpp:360).
         static const uint32_t MaxHitQueries = 16;
 
-        // One BLAS and the buffers backing it. Meshes are accumulated during the draw-call
-        // walk, then built in one submission.
+        // One BLAS and the buffers backing it. The draw-call walk adds one of these per RT
+        // draw call, so the k-th entry corresponds to the k-th index in the scene's
+        // instanceIndices — see updateTopLevelASResources.
+        //
+        // bufferSize and scratchSize record what was allocated, not what the current build
+        // needs, so a frame whose geometry fits the existing allocation reuses it.
         struct BottomLevelAS {
             std::unique_ptr<RenderAccelerationStructure> accelerationStructure;
             std::unique_ptr<RenderBuffer> buffer;
             std::unique_ptr<RenderBuffer> scratchBuffer;
             std::vector<RenderBottomLevelASMesh> meshes;
+            RenderBottomLevelASBuildInfo buildInfo;
             uint64_t bufferSize = 0;
             uint64_t scratchSize = 0;
         };
@@ -92,12 +97,22 @@ namespace RT64 {
         RenderWorker *worker = nullptr;
         UserConfiguration::GraphicsAPI graphicsAPI = UserConfiguration::GraphicsAPI::OptionCount;
 
-        // Acceleration structures.
+        // Acceleration structures. The frame graph tests bottomLevelASVector.empty() to
+        // decide whether an RT frame is worth submitting (rt64_framebuffer_renderer.cpp:1212),
+        // so it must hold this frame's entries and no more. Entries retired by
+        // resetBottomLevelAS move to the pool rather than being destroyed, which is what
+        // keeps a steady stream of frames from reallocating every buffer every frame.
         std::vector<BottomLevelAS> bottomLevelASVector;
+        std::vector<BottomLevelAS> bottomLevelASPool;
         std::unique_ptr<RenderAccelerationStructure> topLevelAS;
         std::unique_ptr<RenderBuffer> topLevelASBuffer;
         std::unique_ptr<RenderBuffer> topLevelASScratchBuffer;
         std::unique_ptr<RenderBuffer> topLevelASInstancesBuffer;
+        RenderTopLevelASBuildInfo topLevelASBuildInfo;
+        std::vector<RenderTopLevelASInstance> topLevelASInstances;
+        uint64_t topLevelASBufferSize = 0;
+        uint64_t topLevelASScratchSize = 0;
+        uint64_t topLevelASInstancesSize = 0;
 
         // Shader binding table. The frame graph rewrites groups.rayGen.startIndex between
         // dispatches to select which ray generation program runs
