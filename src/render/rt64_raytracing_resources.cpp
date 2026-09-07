@@ -217,12 +217,18 @@ namespace RT64 {
     void RaytracingResources::submitBottomLevelASCreation(RenderWorker *worker) {
         assert(worker != nullptr);
 
-        // Once. One structure is built per RT draw call, every frame, so this number is
-        // the shape of the per-frame acceleration structure cost - and the first thing
-        // worth knowing when the GPU hangs rather than faults.
-        static bool reportedBuildCount = false;
-        if (!reportedBuildCount && !bottomLevelASVector.empty()) {
-            reportedBuildCount = true;
+        // Reported whenever a frame needs meaningfully more structures than any frame
+        // before it, rather than once. One structure is built per RT draw call, so this
+        // is the per-frame acceleration structure cost - and a one-shot version of this
+        // reported "1 structure" from a loading screen and then stayed quiet through
+        // every real frame that followed, which is the opposite of useful.
+        //
+        // The pool size comes along because it is the part that persists across frames:
+        // retired entries keep their buffers so a steady stream of frames stops
+        // reallocating, and it is worth seeing if that ever stops being bounded.
+        static size_t reportedPeak = 0;
+        if (bottomLevelASVector.size() > (reportedPeak + reportedPeak / 2)) {
+            reportedPeak = bottomLevelASVector.size();
             uint64_t totalTriangles = 0;
             uint64_t totalScratch = 0;
             for (const BottomLevelAS &blas : bottomLevelASVector) {
@@ -232,8 +238,9 @@ namespace RT64 {
                 totalScratch += blas.scratchSize;
             }
 
-            fprintf(stdout, "rt64: building %zu bottom level structures, %llu triangles, %llu KB scratch\n",
-                bottomLevelASVector.size(), (unsigned long long)totalTriangles, (unsigned long long)(totalScratch / 1024));
+            fprintf(stdout, "rt64: building %zu bottom level structures, %llu triangles, %llu KB scratch, pool %zu\n",
+                bottomLevelASVector.size(), (unsigned long long)totalTriangles,
+                (unsigned long long)(totalScratch / 1024), bottomLevelASPool.size());
             fflush(stdout);
         }
 
@@ -381,6 +388,31 @@ namespace RT64 {
     void RaytracingResources::createOutputBuffers(RenderWorker *worker, int width, int height) {
         assert(worker != nullptr);
         assert((width > 0) && (height > 0));
+
+        // Nothing to do when the size has not moved, and doing it anyway is actively
+        // dangerous rather than merely wasteful.
+        //
+        // The frame graph asks for this whenever the raytracing configuration changes,
+        // which includes a swap chain resize (rt64_workload_queue.cpp:242-248), and it
+        // asks with the size it already has. Every assignment below drops the previous
+        // texture, and a texture the previous frame's command lists still reference is
+        // not ours to drop - freeing one out from under work in flight is a
+        // use-after-free on the GPU, which surfaces as a removed device seconds later
+        // and a crash somewhere else entirely.
+        //
+        // Around 1.5 GB is reallocated here at a window-sized resolution, so the repeat
+        // case is also the expensive one.
+        if ((textureWidth == uint32_t(width)) && (textureHeight == uint32_t(height)) && (outputTexture[0] != nullptr)) {
+            return;
+        }
+
+        // A real resize does still replace textures that earlier frames may have
+        // referenced, so the queue is drained first. This runs only when the size
+        // actually changes, which is rare enough that the stall does not matter and
+        // cheap compared to the reallocation that follows it.
+        if (outputTexture[0] != nullptr) {
+            worker->wait();
+        }
 
         RenderDevice *device = worker->device;
         textureWidth = uint32_t(width);

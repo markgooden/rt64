@@ -781,9 +781,9 @@ namespace RT64 {
         // raytracing only makes a scene eligible, and a frame with no perspective
         // projection that writes depth produces no RaytracingScene at all
         // (rt64_framebuffer_renderer.cpp:1462-1463).
-        static bool reportedFirstTrace = false;
-        if (!reportedFirstTrace) {
-            reportedFirstTrace = true;
+        static size_t reportedTracePeak = 0;
+        if (rtScene.instanceIndices.size() > (reportedTracePeak + reportedTracePeak / 2)) {
+            reportedTracePeak = rtScene.instanceIndices.size();
             fprintf(stdout, "rt64: tracing - %zu instances, %u interleaved rasters, %ux%u\n",
                 rtScene.instanceIndices.size(), interleavedRastersCount,
                 rtResources->textureWidth, rtResources->textureHeight);
