@@ -210,6 +210,10 @@ namespace RT64 {
         uint32_t textureHeight = 0;
         int maxReflections = 2;
         UpscaleMode upscalerMode = UpscaleMode::Bilinear;
+        // Fraction of the display resolution the path tracer renders at. Everything RT
+        // is sized and dispatched from it, so it is the main lever on cost; compose
+        // samples the result back up to the display size.
+        float resolutionScale = 1.0f;
         bool denoiserEnabled = true;
         bool upscaleActive = false;
         bool upscalerReactiveMask = false;

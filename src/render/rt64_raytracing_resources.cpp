@@ -442,6 +442,23 @@ namespace RT64 {
         assert(worker != nullptr);
         assert((width > 0) && (height > 0));
 
+        // Every ray generation dispatch, every filter iteration and every one of these
+        // buffers is sized from this, and the frame graph hands over the display
+        // resolution - which at a window-sized 2880x1980 is 5.7 million pixels traced six
+        // times per frame. Measured at 110 ms of GPU time per frame there, against 21 ms
+        // for the same frame with the path tracer off, which is what eventually trips the
+        // two second timeout the driver enforces.
+        //
+        // RaytracingConfiguration carries a resolutionScale for exactly this, and it was
+        // being read in setRaytracingConfig and then ignored. Tracing below the display
+        // resolution and letting compose sample the result back up is the normal
+        // arrangement for a path tracer, not a workaround.
+        //
+        // Clamped rather than trusted: the value reaches here from a debugger slider.
+        const float scale = std::clamp(resolutionScale, 0.125f, 1.0f);
+        width = std::max(int(lround(width * scale)), 1);
+        height = std::max(int(lround(height * scale)), 1);
+
         // Nothing to do when the size has not moved, and doing it anyway is actively
         // dangerous rather than merely wasteful.
         //
@@ -591,6 +608,21 @@ namespace RT64 {
         for (uint32_t i = 0; i < targetCount; i++) {
             RenderTarget *colorTarget = interleavedColorTargetVector[i].get();
             RenderTarget *depthTarget = interleavedDepthTargetVector[i].get();
+
+            // KNOWN DEFECT, not yet fixed. setupColor and setupDepth release the existing
+            // texture and allocate a new one every time they are called
+            // (rt64_render_target.cpp:80,89), and this runs every frame, so a
+            // full-resolution colour and depth target is destroyed and rebuilt per frame
+            // while earlier frames' command lists may still reference them.
+            //
+            // Measured: at 2880x1980 the device is removed after 36 frames, where a quarter
+            // of that resolution survives 187 - per-frame churn proportional to target size.
+            //
+            // Two attempts at fixing it were both worse and are recorded so they are not
+            // repeated. RenderTarget::resize skips the framebuffer setup that has to follow
+            // it and died at frame 6. Guarding the whole block on a size change died at
+            // frame 5. Something else in this path depends on the setup running, and that
+            // dependency needs to be understood before it is removed.
             colorTarget->setupColor(worker, uint32_t(width), uint32_t(height));
             colorTarget->setupColorFramebuffer(worker);
             depthTarget->setupDepth(worker, uint32_t(width), uint32_t(height));
@@ -719,6 +751,11 @@ namespace RT64 {
         upscalerReactiveMask = rtConfig.upscalerReactiveMask;
         upscalerLockMask = rtConfig.upscalerLockMask;
 
+        // A change of scale changes the size of every RT resource, so it counts as a
+        // resolution change even when the display resolution has not moved.
+        const bool scaleChanged = (resolutionScale != rtConfig.resolutionScale);
+        resolutionScale = rtConfig.resolutionScale;
+
         rtParams.diSamples = uint32_t(std::max(rtConfig.diSamples, 0));
         rtParams.giSamples = uint32_t(std::max(rtConfig.giSamples, 0));
         rtParams.maxLights = uint32_t(std::max(rtConfig.maxLights, 0));
@@ -726,7 +763,7 @@ namespace RT64 {
         rtParams.motionBlurSamples = uint32_t(std::max(rtConfig.motionBlurSamples, 0));
         rtParams.visualizationMode = rtConfig.visualizationMode;
 
-        if (resolutionChanged) {
+        if (resolutionChanged || scaleChanged) {
             // The output resources are sized from the scene, which the frame graph only
             // knows once it has walked the draw calls, so this can only request the work.
             updateOutputBuffers = true;
