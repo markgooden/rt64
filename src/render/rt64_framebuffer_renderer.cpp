@@ -886,6 +886,16 @@ namespace RT64 {
         Framebuffer &framebuffer = framebufferVector[framebufferCount - 1];
         RenderDescriptorSet *descRealFbSet = framebuffer.descRealFbSet->get();
 
+        // One line, the first time rays are actually recorded, so a run that silently takes
+        // the raster path is distinguishable from one that traced. RT64_LOG_PRINTF is
+        // compiled out of release builds, so it cannot answer that on its own.
+        static bool reportedFirstDispatch = false;
+        if (!reportedFirstDispatch) {
+            fprintf(stderr, "rt64: first raytracing dispatch, %zu instances at %ux%u\n",
+                rtResources->topLevelASInstances.size(), rtResources->textureWidth, rtResources->textureHeight);
+            reportedFirstDispatch = true;
+        }
+
         if (rtStageMask() & RtStagePrimary) {
         // Bind pipeline and dispatch primary rays.
         RT64_LOG_PRINTF("Dispatching primary rays");
@@ -1039,13 +1049,21 @@ namespace RT64 {
         RenderTexture *rtOutputCur = rtResources->outputTexture[rtResources->swapBuffers ? 1 : 0].get();
 
         // Barriers for shading buffers after rays are finished.
+        //
+        // flowTexture belongs here and was missing: preDispatchBarriers puts it in GENERAL for
+        // the ray dispatch to write, composeSet binds it as gFlow (rt64_descriptor_sets.h:445),
+        // and the only transition back to SHADER_READ was in afterComposeBarriers -- after the
+        // draw that reads it. D3D12 GPU-based validation flags the compose draw with
+        // EXECUTION ERROR #942 GPU_BASED_VALIDATION_INCOMPATIBLE_RESOURCE_STATE (SRV bound
+        // while the resource is in UNORDERED_ACCESS), and the read hangs the device.
         RenderTextureBarrier afterDispatchBarriers[] = {
             RenderTextureBarrier(rtOutputCur, RenderTextureLayout::COLOR_WRITE),
             RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE),
             RenderTextureBarrier(rtResources->diffuseTexture.get(), RenderTextureLayout::SHADER_READ),
             RenderTextureBarrier(rtResources->reflectionTexture.get(), RenderTextureLayout::SHADER_READ),
             RenderTextureBarrier(rtResources->refractionTexture.get(), RenderTextureLayout::SHADER_READ),
-            RenderTextureBarrier(rtResources->transparentTexture.get(), RenderTextureLayout::SHADER_READ)
+            RenderTextureBarrier(rtResources->transparentTexture.get(), RenderTextureLayout::SHADER_READ),
+            RenderTextureBarrier(rtResources->flowTexture.get(), RenderTextureLayout::SHADER_READ)
         };
 
         worker->commandList->barriers(RenderBarrierStage::GRAPHICS, afterDispatchBarriers, uint32_t(std::size(afterDispatchBarriers)));
@@ -1066,12 +1084,13 @@ namespace RT64 {
         worker->commandList->setGraphicsDescriptorSet(rtResources->composeSet->get(), 0);
         worker->commandList->drawInstanced(3, 1, 0, 0);
 
-        // Switch resources to the correct states after composing the image
+        // Switch resources to the correct states after composing the image. flowTexture is
+        // already SHADER_READ by now (afterDispatchBarriers), and the post-process set that
+        // reads it next wants that same state, so it is no longer listed here.
         RenderTextureBarrier afterComposeBarriers[] = {
             RenderTextureBarrier(rtOutputCur, RenderTextureLayout::SHADER_READ),
             RenderTextureBarrier(rtResources->filteredDirectLightTexture[1].get(), RenderTextureLayout::GENERAL),
             RenderTextureBarrier(rtResources->filteredIndirectLightTexture[1].get(), RenderTextureLayout::GENERAL),
-            RenderTextureBarrier(rtResources->flowTexture.get(), RenderTextureLayout::SHADER_READ),
             RenderTextureBarrier(rtResources->reactiveMaskTexture.get(), RenderTextureLayout::SHADER_READ),
             RenderTextureBarrier(rtResources->lockMaskTexture.get(), RenderTextureLayout::SHADER_READ)
         };
