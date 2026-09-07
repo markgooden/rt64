@@ -78,6 +78,10 @@ namespace RT64 {
         // (rt64_framebuffer_renderer.cpp:360).
         static const uint32_t MaxHitQueries = 16;
 
+        // Auto-exposure histogram size, fixed by the shaders that share it
+        // (shaders/LuminanceHistogramCS.hlsl:10, shaders/HistogramAverageCS.hlsl:11).
+        static const uint32_t HistogramBins = 64;
+
         // One BLAS and the buffers backing it. The draw-call walk adds one of these per RT
         // draw call, so the k-th entry corresponds to the k-th index in the scene's
         // instanceIndices — see updateTopLevelASResources.
@@ -164,6 +168,11 @@ namespace RT64 {
         BufferPair rtParamsBuffer;
         BufferPair lightsBuffer;
 
+        // 64 bins of auto-exposure histogram, shared by the four luminance stages
+        // (shaders/LuminanceHistogramCS.hlsl:10). Never named by the frame graph, which only
+        // binds the descriptor sets, so it is owned here.
+        std::unique_ptr<RenderBuffer> luminanceHistogramBuffer;
+
         // Descriptor sets for the non-RT stages of the frame graph. Every pipeline these
         // bind to is already built unconditionally in ShaderLibrary.
         std::unique_ptr<RaytracingComposeDescriptorSet> composeSet;
@@ -175,10 +184,14 @@ namespace RT64 {
         std::unique_ptr<HistogramSetDescriptorSet> lumaSetSet;
         std::unique_ptr<PostProcessDescriptorSet> postProcessSet;
 
-        // Rasterized views composited into the traced image (mirrors, screens).
+        // Rasterized views composited into the traced image (mirrors, screens). Their
+        // multisampling and HDR settings track the framebuffer they will be composited into,
+        // which is why updateInterleavedRenderTargets is handed both.
         std::vector<std::unique_ptr<RenderTarget>> interleavedColorTargetVector;
         std::vector<std::unique_ptr<RenderTarget>> interleavedDepthTargetVector;
         std::vector<std::unique_ptr<RenderFramebufferStorage>> interleavedFramebufferStorageVector;
+        RenderMultisampling interleavedMultisampling;
+        bool interleavedUsesHDR = false;
 
         // Parameters uploaded to the RT pipeline each frame.
         interop::RaytracingParams rtParams;

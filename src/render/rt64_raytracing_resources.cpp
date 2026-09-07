@@ -200,6 +200,238 @@ namespace RT64 {
         worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(topLevelASBuffer.get(), RenderBufferAccess::READ));
     }
 
+    // Output resources.
+    //
+    // Formats are not free choices. The component counts come from the UAV declarations in
+    // shaders/FbRendererRT.hlsli:30-56, and the hit buffer element sizes come from the byte
+    // strides the frame graph itself computes when it binds them
+    // (rt64_framebuffer_renderer.cpp:360-364): 16, 4, 8 and 2 bytes per query.
+
+    static std::unique_ptr<RenderTexture> createStorageTexture(RenderDevice *device, uint32_t width, uint32_t height, RenderFormat format) {
+        return device->createTexture(RenderTextureDesc::Texture2D(width, height, 1, format, RenderTextureFlag::UNORDERED_ACCESS | RenderTextureFlag::STORAGE));
+    }
+
+    void RaytracingResources::createOutputBuffers(RenderWorker *worker, int width, int height) {
+        assert(worker != nullptr);
+        assert((width > 0) && (height > 0));
+
+        RenderDevice *device = worker->device;
+        textureWidth = uint32_t(width);
+        textureHeight = uint32_t(height);
+
+        // World position needs full float precision; everything else that carries colour or
+        // a normal is fine at half.
+        const RenderFormat HDR = RenderFormat::R16G16B16A16_FLOAT;
+        shadingPositionTexture = createStorageTexture(device, textureWidth, textureHeight, RenderFormat::R32G32B32A32_FLOAT);
+        viewDirectionTexture = createStorageTexture(device, textureWidth, textureHeight, HDR);
+        shadingNormalTexture = createStorageTexture(device, textureWidth, textureHeight, HDR);
+        shadingSpecularTexture = createStorageTexture(device, textureWidth, textureHeight, HDR);
+        diffuseTexture = createStorageTexture(device, textureWidth, textureHeight, HDR);
+        reflectionTexture = createStorageTexture(device, textureWidth, textureHeight, HDR);
+        refractionTexture = createStorageTexture(device, textureWidth, textureHeight, HDR);
+        transparentTexture = createStorageTexture(device, textureWidth, textureHeight, HDR);
+
+        // gInstanceId is RWTexture2D<int>, and -1 has to survive as "nothing was hit".
+        instanceIdTexture = createStorageTexture(device, textureWidth, textureHeight, RenderFormat::R32_SINT);
+
+        // gFlow is float2, the two mask textures are scalar. The masks are half float rather
+        // than 8-bit unorm because they are written through a UAV, and typed UAV writes to
+        // 8-bit formats are not guaranteed without checking format support first.
+        flowTexture = createStorageTexture(device, textureWidth, textureHeight, RenderFormat::R16G16_FLOAT);
+        reactiveMaskTexture = createStorageTexture(device, textureWidth, textureHeight, RenderFormat::R16_FLOAT);
+        lockMaskTexture = createStorageTexture(device, textureWidth, textureHeight, RenderFormat::R16_FLOAT);
+
+        for (uint32_t i = 0; i < 2; i++) {
+            directLightTexture[i] = createStorageTexture(device, textureWidth, textureHeight, HDR);
+            indirectLightTexture[i] = createStorageTexture(device, textureWidth, textureHeight, HDR);
+            normalRoughnessTexture[i] = createStorageTexture(device, textureWidth, textureHeight, HDR);
+            filteredDirectLightTexture[i] = createStorageTexture(device, textureWidth, textureHeight, HDR);
+            filteredIndirectLightTexture[i] = createStorageTexture(device, textureWidth, textureHeight, HDR);
+
+            // Depth is compared against the previous frame's for reprojection, so it keeps
+            // full precision.
+            depthTexture[i] = createStorageTexture(device, textureWidth, textureHeight, RenderFormat::R32_FLOAT);
+
+            // The compose pass draws into these, so they are render targets as well as
+            // sampled inputs to post-process.
+            outputTexture[i] = device->createTexture(RenderTextureDesc::ColorTarget(textureWidth, textureHeight, HDR));
+
+            const RenderTexture *colorAttachment = outputTexture[i].get();
+            outputFramebuffer[i] = device->createFramebuffer(RenderFramebufferDesc(&colorAttachment, 1));
+        }
+
+        // Auto exposure works off a fixed eighth-resolution copy of the composed image
+        // (rt64_framebuffer_renderer.cpp:999-1003 dispatches over width/8 by height/8).
+        downscaledOutputTexture = createStorageTexture(device, std::max(textureWidth / 8, 1U), std::max(textureHeight / 8, 1U), HDR);
+        lumaAverageTexture = createStorageTexture(device, 1, 1, RenderFormat::R32_FLOAT);
+        upscaledOutputTexture = createStorageTexture(device, textureWidth, textureHeight, HDR);
+
+        const uint32_t hitBufferPixelCount = textureWidth * textureHeight * MaxHitQueries;
+        hitVelocityDistanceBuffer = device->createBuffer(RenderBufferDesc::DefaultBuffer(uint64_t(hitBufferPixelCount) * 16, RenderBufferFlag::STORAGE | RenderBufferFlag::FORMATTED));
+        hitColorBuffer = device->createBuffer(RenderBufferDesc::DefaultBuffer(uint64_t(hitBufferPixelCount) * 4, RenderBufferFlag::STORAGE | RenderBufferFlag::FORMATTED));
+        hitNormalFogBuffer = device->createBuffer(RenderBufferDesc::DefaultBuffer(uint64_t(hitBufferPixelCount) * 8, RenderBufferFlag::STORAGE | RenderBufferFlag::FORMATTED));
+        hitInstanceIdBuffer = device->createBuffer(RenderBufferDesc::DefaultBuffer(uint64_t(hitBufferPixelCount) * 2, RenderBufferFlag::STORAGE | RenderBufferFlag::FORMATTED));
+        hitVelocityDistanceBufferView = hitVelocityDistanceBuffer->createBufferFormattedView(RenderFormat::R32G32B32A32_FLOAT);
+        hitColorBufferView = hitColorBuffer->createBufferFormattedView(RenderFormat::R8G8B8A8_UNORM);
+        hitNormalFogBufferView = hitNormalFogBuffer->createBufferFormattedView(RenderFormat::R16G16B16A16_FLOAT);
+        hitInstanceIdBufferView = hitInstanceIdBuffer->createBufferFormattedView(RenderFormat::R16_UINT);
+
+        if (luminanceHistogramBuffer == nullptr) {
+            luminanceHistogramBuffer = device->createBuffer(RenderBufferDesc::DefaultBuffer(HistogramBins * sizeof(uint32_t), RenderBufferFlag::STORAGE));
+        }
+
+        rtParams.resolution = { float(textureWidth), float(textureHeight), 1.0f / float(textureWidth), 1.0f / float(textureHeight) };
+
+        // Everything above was just created, so it is in whatever layout the backend starts
+        // resources in. The frame graph does the transition itself the first time it submits
+        // (rt64_framebuffer_renderer.cpp:766-787); this only tells it that it must.
+        transitionOutputBuffers = true;
+
+        // Nothing accumulated at the previous size can be reprojected into the new one.
+        skipReprojection = true;
+    }
+
+    void RaytracingResources::updateInterleavedRenderTargets(RenderWorker *worker, int width, int height, uint32_t targetCount, const RenderMultisampling &multisampling, bool usesHDR) {
+        assert(worker != nullptr);
+
+        // A change in either setting invalidates the targets rather than resizing them,
+        // because both are baked into the RenderTarget at construction.
+        const bool settingsChanged = (multisampling.sampleCount != interleavedMultisampling.sampleCount) || (usesHDR != interleavedUsesHDR);
+        if (settingsChanged) {
+            interleavedFramebufferStorageVector.clear();
+            interleavedColorTargetVector.clear();
+            interleavedDepthTargetVector.clear();
+            interleavedMultisampling = multisampling;
+            interleavedUsesHDR = usesHDR;
+        }
+
+        while (interleavedColorTargetVector.size() < targetCount) {
+            // The address is only used to name the target for the debugger, and these are
+            // not backed by RDRAM at all, so the index stands in for one.
+            const uint32_t addressForName = uint32_t(interleavedColorTargetVector.size());
+            interleavedColorTargetVector.emplace_back(std::make_unique<RenderTarget>(addressForName, Framebuffer::Type::Color, interleavedMultisampling, interleavedUsesHDR));
+            interleavedDepthTargetVector.emplace_back(std::make_unique<RenderTarget>(addressForName, Framebuffer::Type::Depth, interleavedMultisampling, interleavedUsesHDR));
+            interleavedFramebufferStorageVector.emplace_back(std::make_unique<RenderFramebufferStorage>());
+        }
+
+        for (uint32_t i = 0; i < targetCount; i++) {
+            RenderTarget *colorTarget = interleavedColorTargetVector[i].get();
+            RenderTarget *depthTarget = interleavedDepthTargetVector[i].get();
+            colorTarget->setupColor(worker, uint32_t(width), uint32_t(height));
+            colorTarget->setupColorFramebuffer(worker);
+            depthTarget->setupDepth(worker, uint32_t(width), uint32_t(height));
+            depthTarget->setupDepthFramebuffer(worker);
+
+            RenderFramebufferKey framebufferKey;
+            framebufferKey.modifierKey = i;
+            interleavedFramebufferStorageVector[i]->setup(worker->device, framebufferKey, colorTarget, depthTarget);
+        }
+    }
+
+    void RaytracingResources::updateMultisampling() {
+        // Multisampling is fixed when a RenderTarget is constructed, so the interleaved
+        // targets cannot be adjusted in place. Dropping them makes the next
+        // updateInterleavedRenderTargets rebuild them at the new setting; nothing else here
+        // is multisampled.
+        interleavedFramebufferStorageVector.clear();
+        interleavedColorTargetVector.clear();
+        interleavedDepthTargetVector.clear();
+    }
+
+    void RaytracingResources::updateShaderSets(RenderWorker *worker, const ShaderLibrary *shaderLibrary) {
+        assert(worker != nullptr);
+        assert(shaderLibrary != nullptr);
+
+        // Nothing to bind until the output resources exist.
+        if (outputTexture[0] == nullptr) {
+            return;
+        }
+
+        RenderDevice *device = worker->device;
+        const SamplerLibrary &samplerLibrary = shaderLibrary->samplerLibrary;
+        if (composeSet == nullptr) {
+            composeSet = std::make_unique<RaytracingComposeDescriptorSet>(samplerLibrary, device);
+            indirectFilterSets[0] = std::make_unique<GaussianFilterDescriptorSet>(samplerLibrary, device);
+            indirectFilterSets[1] = std::make_unique<GaussianFilterDescriptorSet>(samplerLibrary, device);
+            downscaleSet = std::make_unique<BicubicScalingDescriptorSet>(samplerLibrary, device);
+            lumaSet = std::make_unique<LuminanceHistogramDescriptorSet>(device);
+            lumaAvgSet = std::make_unique<HistogramAverageDescriptorSet>(device);
+            lumaClearSet = std::make_unique<HistogramClearDescriptorSet>(device);
+            lumaSetSet = std::make_unique<HistogramSetDescriptorSet>(device);
+            postProcessSet = std::make_unique<PostProcessDescriptorSet>(samplerLibrary, device);
+        }
+
+        // The half the current frame writes. swapBuffers only flips in advanceFrame
+        // (rt64_framebuffer_renderer.cpp:1828), after this and after the ray dispatch, so
+        // both see the same value.
+        const uint32_t cur = swapBuffers ? 1 : 0;
+
+        // Compose reads the filtered accumulation buffers, which is why the frame graph
+        // copies the raw ones into [1] before it draws (:878-919).
+        composeSet->setTexture(composeSet->gFlow, flowTexture.get(), RenderTextureLayout::SHADER_READ);
+        composeSet->setTexture(composeSet->gDiffuse, diffuseTexture.get(), RenderTextureLayout::SHADER_READ);
+        composeSet->setTexture(composeSet->gDirectLight, filteredDirectLightTexture[1].get(), RenderTextureLayout::SHADER_READ);
+        composeSet->setTexture(composeSet->gIndirectLight, filteredIndirectLightTexture[1].get(), RenderTextureLayout::SHADER_READ);
+        composeSet->setTexture(composeSet->gReflection, reflectionTexture.get(), RenderTextureLayout::SHADER_READ);
+        composeSet->setTexture(composeSet->gRefraction, refractionTexture.get(), RenderTextureLayout::SHADER_READ);
+        composeSet->setTexture(composeSet->gTransparent, transparentTexture.get(), RenderTextureLayout::SHADER_READ);
+
+        // The GI blur ping-pongs between the two filtered buffers. Set k reads [k] and
+        // writes [1 - k], which is what makes the frame graph's alternating barriers at
+        // :938-943 line up, and leaves the result in [1] after its five iterations.
+        for (uint32_t k = 0; k < 2; k++) {
+            indirectFilterSets[k]->setTexture(indirectFilterSets[k]->gInput, filteredIndirectLightTexture[k].get(), RenderTextureLayout::SHADER_READ);
+            indirectFilterSets[k]->setTexture(indirectFilterSets[k]->gOutput, filteredIndirectLightTexture[1 - k].get(), RenderTextureLayout::GENERAL);
+        }
+
+        downscaleSet->setTexture(downscaleSet->gInput, outputTexture[cur].get(), RenderTextureLayout::SHADER_READ);
+        downscaleSet->setTexture(downscaleSet->gOutput, downscaledOutputTexture.get(), RenderTextureLayout::GENERAL);
+
+        lumaSet->setTexture(lumaSet->HDRTexture, downscaledOutputTexture.get(), RenderTextureLayout::SHADER_READ);
+        lumaSet->setBuffer(lumaSet->LuminanceHistogram, luminanceHistogramBuffer.get(), HistogramBins * sizeof(uint32_t));
+        lumaAvgSet->setBuffer(lumaAvgSet->LuminanceHistogram, luminanceHistogramBuffer.get(), HistogramBins * sizeof(uint32_t));
+        lumaAvgSet->setTexture(lumaAvgSet->LuminanceOutput, lumaAverageTexture.get(), RenderTextureLayout::GENERAL);
+        lumaClearSet->setBuffer(lumaClearSet->LuminanceHistogram, luminanceHistogramBuffer.get(), HistogramBins * sizeof(uint32_t));
+        lumaSetSet->setTexture(lumaSetSet->LuminanceOutput, lumaAverageTexture.get(), RenderTextureLayout::GENERAL);
+
+        // Post-process reads the upscaled image when an upscaler ran and the composed one
+        // otherwise. getUpscaler returns nullptr in this tree, so this is always the
+        // composed image today, but the condition is the one the frame graph applies.
+        const bool upscalerActive = upscaleActive && (getUpscaler(upscalerMode) != nullptr);
+        RenderTexture *postProcessInput = upscalerActive ? upscaledOutputTexture.get() : outputTexture[cur].get();
+        postProcessSet->setBuffer(postProcessSet->RtParams, rtParamsBuffer.get(), sizeof(interop::RaytracingParams));
+        postProcessSet->setTexture(postProcessSet->gInput, postProcessInput, RenderTextureLayout::SHADER_READ);
+        postProcessSet->setTexture(postProcessSet->gFlow, flowTexture.get(), RenderTextureLayout::SHADER_READ);
+        postProcessSet->setTexture(postProcessSet->gLumaAvg, lumaAverageTexture.get(), RenderTextureLayout::SHADER_READ);
+    }
+
+    void RaytracingResources::updateLightsBuffer(RenderWorker *worker, const RaytracingScene &rtScene) {
+        assert(worker != nullptr);
+
+        rtParams.lightsCount = rtScene.lightCount;
+
+        // The shader indexes SceneLights unconditionally, and the frame graph sizes the
+        // binding with std::max(lightsCount, 1) (rt64_framebuffer_renderer.cpp:366), so the
+        // buffer must exist even for a scene with no lights.
+        const uint32_t lightCount = std::max(rtScene.lightCount, 1U);
+        const uint64_t requiredSize = uint64_t(lightCount) * sizeof(interop::PointLight);
+        if ((lightsBuffer.defaultBuffer == nullptr) || (lightsBuffer.allocatedSize < requiredSize)) {
+            lightsBuffer.allocatedSize = allocationForSize(requiredSize);
+            lightsBuffer.uploadBuffer = worker->device->createBuffer(RenderBufferDesc::UploadBuffer(lightsBuffer.allocatedSize));
+            lightsBuffer.defaultBuffer = worker->device->createBuffer(RenderBufferDesc::DefaultBuffer(lightsBuffer.allocatedSize, RenderBufferFlag::STORAGE));
+        }
+
+        if (rtScene.lightCount > 0) {
+            const uint64_t copySize = uint64_t(rtScene.lightCount) * sizeof(interop::PointLight);
+            const RenderRange writtenRange(0, copySize);
+            void *dstData = lightsBuffer.uploadBuffer->map();
+            memcpy(dstData, rtScene.pointLights, copySize);
+            lightsBuffer.uploadBuffer->unmap(0, &writtenRange);
+            worker->commandList->copyBufferRegion(lightsBuffer.defaultBuffer->at(0), lightsBuffer.uploadBuffer->at(0), copySize);
+            worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(lightsBuffer.defaultBuffer.get(), RenderBufferAccess::READ));
+        }
+    }
+
     // Configuration.
 
     void RaytracingResources::setRaytracingConfig(const RaytracingConfiguration &rtConfig, bool resolutionChanged) {
