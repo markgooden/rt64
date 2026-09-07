@@ -66,6 +66,7 @@ namespace RT64 {
         RtStagePost = 1u << 5,
         RtStageBindRoot = 1u << 6,  // the root signature and descriptor sets bound before traceRays
         RtStageBindBvh = 1u << 7,   // the top level structure bound into the common set
+        RtStageBindRtViews = 1u << 8,  // the RT textures and buffers bound into the common set
         RtStageAll = 0xFFFFFFFFu
     };
 
@@ -357,7 +358,7 @@ namespace RT64 {
         }
 
 #   if RT_ENABLED
-        if (raytracingEnabled) {
+        if (raytracingEnabled && (rtStageMask() & RtStageBindRtViews)) {
             descCommonSet->setBuffer(descCommonSet->posBuffer, outputBuffers->worldPosBuffer.buffer.get(), outputBuffers->worldPosBuffer.allocatedSize);
             descCommonSet->setBuffer(descCommonSet->normBuffer, outputBuffers->worldNormBuffer.buffer.get(), outputBuffers->worldNormBuffer.allocatedSize);
             descCommonSet->setBuffer(descCommonSet->velBuffer, outputBuffers->worldVelBuffer.buffer.get(), outputBuffers->worldVelBuffer.allocatedSize);
