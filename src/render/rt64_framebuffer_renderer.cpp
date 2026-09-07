@@ -68,6 +68,7 @@ namespace RT64 {
         RtStageBindBvh = 1u << 7,   // the top level structure bound into the common set
         RtStageBindRtViews = 1u << 8,  // the RT textures and buffers bound into the common set
         RtStageExtraScenes = 1u << 9,  // dispatches for scenes the resources were not built for
+        RtStageInterleaved = 1u << 10, // the raster scenes drawn into the interleaved render targets
         RtStageAll = 0xFFFFFFFFu
     };
 
@@ -1368,7 +1369,7 @@ namespace RT64 {
                 // Draw all the interleaved rasterized buffers that will be used in the render target.
                 thread_local std::vector<RenderTextureBarrier> interleavedBarriers;
                 interleavedBarriers.clear();
-                for (uint32_t i = 0; i < interleavedRastersCount; i++) {
+                for (uint32_t i = 0; (i < interleavedRastersCount) && (rtStageMask() & RtStageInterleaved); i++) {
                     bool interleavedDepthState = false;
                     const uint32_t sceneIndex = rtScene.interleavedRasters[i].rasterSceneIndex;
                     RenderTarget *colorRenderTarget = rtResources->interleavedColorTargetVector[i].get();

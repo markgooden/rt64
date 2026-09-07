@@ -8,6 +8,7 @@
 #include <cassert>
 #include <cstring>
 #include <cstdlib>
+#include <cstdarg>
 
 #ifdef _WIN32
 #   include <d3d12.h>
@@ -78,6 +79,78 @@ namespace RT64 {
     // DXGI_ERROR_DEVICE_HUNG or _REMOVED; with it the breadcrumbs name the last GPU
     // operations that completed, so a fault inside an acceleration structure build looks
     // different from one inside a dispatch.
+    // A removed device takes other threads down with it: they get nullptr back from creates
+    // they do not null-check and fault, and a report written line by line is cut off
+    // mid-sentence when they do. The report is therefore accumulated here and written once,
+    // which is as close to atomic as this can get without a lock the crashing thread would
+    // not take anyway.
+    struct DredReport {
+        char text[8192];
+        size_t used = 0;
+
+        void addf(const char *format, ...) {
+            if (used >= (sizeof(text) - 1)) {
+                return;
+            }
+
+            va_list args;
+            va_start(args, format);
+            const int wrote = vsnprintf(text + used, sizeof(text) - used, format, args);
+            va_end(args);
+            if (wrote > 0) {
+                used += size_t(wrote);
+                if (used > (sizeof(text) - 1)) {
+                    used = sizeof(text) - 1;
+                }
+            }
+        }
+
+        void flush() const {
+            fwrite(text, 1, used, stderr);
+            fflush(stderr);
+        }
+    };
+
+    // DRED's strings and history arrays are written by the driver into memory this process
+    // does not own, and after a DXGI_ERROR_DRIVER_INTERNAL_ERROR they are not always
+    // readable: printing pCommandListDebugNameW with %ls faulted here, killing the process
+    // in the middle of the one report that would have explained the removal. Every read of
+    // DRED memory therefore goes through these, which fall back to a placeholder rather than
+    // taking the process down. No C++ objects live in either, because __try forbids unwinding.
+    static void copyDredName(const wchar_t *src, char *dst, size_t cap) {
+        if (src == nullptr) {
+            strncpy_s(dst, cap, "(unnamed)", _TRUNCATE);
+            return;
+        }
+
+        __try {
+            size_t i = 0;
+            for (; (i + 1) < cap; i++) {
+                const wchar_t w = src[i];
+                if (w == L'\0') {
+                    break;
+                }
+
+                dst[i] = ((w >= 0x20) && (w < 0x7F)) ? char(w) : '?';
+            }
+
+            dst[i] = '\0';
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            strncpy_s(dst, cap, "(unreadable)", _TRUNCATE);
+        }
+    }
+
+    static bool readDredOp(const D3D12_AUTO_BREADCRUMB_OP *history, uint32_t index, int *out) {
+        __try {
+            *out = int(history[index]);
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
+
     static bool reportDeviceRemoval(RenderDevice *device, UserConfiguration::GraphicsAPI graphicsAPI, const char *where) {
         if (graphicsAPI != UserConfiguration::GraphicsAPI::D3D12) {
             return false;
@@ -99,12 +172,14 @@ namespace RT64 {
         }
 
         reported = true;
-        fprintf(stderr, "rt64: the D3D12 device was removed before %s, reason 0x%08lX\n", where, (unsigned long)reason);
+
+        DredReport report;
+        report.addf("rt64: the D3D12 device was removed before %s, reason 0x%08lX\n", where, (unsigned long)reason);
 
         ID3D12DeviceRemovedExtendedData1 *dred = nullptr;
         if (FAILED(d3d12Device->d3d->QueryInterface(IID_PPV_ARGS(&dred)))) {
-            fprintf(stderr, "rt64: no DRED available; set PDRT64_RT_DRED=1 before launching to turn it on\n");
-            fflush(stderr);
+            report.addf("rt64: no DRED available; set PDRT64_RT_DRED=1 before launching to turn it on\n");
+            report.flush();
             return true;
         }
 
@@ -120,15 +195,22 @@ namespace RT64 {
                     continue;
                 }
 
-                fprintf(stderr, "rt64: DRED - command list '%ls' stopped at operation %u of %u\n",
-                    (node->pCommandListDebugNameW != nullptr) ? node->pCommandListDebugNameW : L"(unnamed)",
-                    done, node->BreadcrumbCount);
+                char name[128];
+                copyDredName(node->pCommandListDebugNameW, name, sizeof(name));
+                report.addf("rt64: DRED - command list '%s' stopped at operation %u of %u\n",
+                    name, done, node->BreadcrumbCount);
 
                 // The operation it stopped on is the one that faulted, and the few before it
                 // are the context that makes it readable.
                 const uint32_t first = (done > 4) ? (done - 4) : 0;
-                for (uint32_t i = first; (i <= done) && (i < node->BreadcrumbCount); i++) {
-                    fprintf(stderr, "rt64: DRED -   [%u] op %d%s\n", i, int(node->pCommandHistory[i]), (i == done) ? "  <-- faulted here" : "");
+                for (uint32_t i = first; (i <= done) && (i < node->BreadcrumbCount) && (node->pCommandHistory != nullptr); i++) {
+                    int op = 0;
+                    if (!readDredOp(node->pCommandHistory, i, &op)) {
+                        report.addf("rt64: DRED -   [%u] (history unreadable)\n", i);
+                        break;
+                    }
+
+                    report.addf("rt64: DRED -   [%u] op %d%s\n", i, op, (i == done) ? "  <-- faulted here" : "");
                 }
 
                 incompleteCount++;
@@ -136,23 +218,25 @@ namespace RT64 {
 
             // Never silent. Every list having finished points at a timeout rather than a
             // fault, and those are different problems with different fixes.
-            fprintf(stderr, "rt64: DRED - %u command lists recorded, %u unfinished%s\n", nodeCount, incompleteCount,
+            report.addf("rt64: DRED - %u command lists recorded, %u unfinished%s\n", nodeCount, incompleteCount,
                 ((nodeCount > 0) && (incompleteCount == 0)) ? " (all completed - looks like a timeout, not a fault)" : "");
         }
         else {
-            fprintf(stderr, "rt64: DRED - no breadcrumbs were captured\n");
+            report.addf("rt64: DRED - no breadcrumbs were captured\n");
         }
 
         D3D12_DRED_PAGE_FAULT_OUTPUT1 pageFault = {};
         if (SUCCEEDED(dred->GetPageFaultAllocationOutput1(&pageFault))) {
-            fprintf(stderr, "rt64: DRED - page fault at GPU address 0x%llX\n", (unsigned long long)pageFault.PageFaultVA);
+            report.addf("rt64: DRED - page fault at GPU address 0x%llX\n", (unsigned long long)pageFault.PageFaultVA);
             for (const D3D12_DRED_ALLOCATION_NODE1 *node = pageFault.pHeadRecentFreedAllocationNode; node != nullptr; node = node->pNext) {
-                fprintf(stderr, "rt64: DRED -   recently freed: '%ls'\n", (node->ObjectNameW != nullptr) ? node->ObjectNameW : L"(unnamed)");
+                char freedName[128];
+                copyDredName(node->ObjectNameW, freedName, sizeof(freedName));
+                report.addf("rt64: DRED -   recently freed: '%s'\n", freedName);
             }
         }
 
         dred->Release();
-        fflush(stderr);
+        report.flush();
         return true;
     }
 #else
@@ -446,6 +530,28 @@ namespace RT64 {
         groups.hitGroup = RenderShaderBindingGroup(hitGroups.data(), uint32_t(hitGroups.size()));
 
         worker->device->setShaderBindingTableInfo(shaderBindingTableInfo, groups, rtState->pipeline.get(), descriptorSets, descriptorSetCount);
+
+        // DispatchRays takes a single ray generation *record*, not a table of them, and
+        // D3D12 reads everything inside RayGenerationShaderRecord.SizeInBytes as that one
+        // record's local root arguments.
+        //
+        // plume sizes every group as stride * programCount and leaves startIndex at 0
+        // (plume_d3d12.cpp:4058-4068), then builds the dispatch as
+        //
+        //     StartAddress = table + offset + startIndex * stride
+        //     SizeInBytes  = size
+        //
+        // (plume_d3d12.cpp:2001-2002). That is right for the miss and hit group tables,
+        // which really are tables the shaders index into, and wrong for this one as soon as
+        // the frame graph selects a program: with five 64 byte records, startIndex 4 declares
+        // a 320 byte record starting at the last one, so 256 bytes of the miss and hit group
+        // records are read as local root arguments. The device hangs intermittently, in a
+        // later raster draw rather than in the dispatch, and no validation layer sees it -
+        // every API call involved is legal.
+        //
+        // The size the raygen group should carry is therefore one record. Only traceRays
+        // reads it; the table's bytes come from tableBufferData.
+        shaderBindingTableInfo.groups.rayGen.size = shaderBindingTableInfo.groups.rayGen.stride;
 
         // As with the top level instances, plume fills the table's bytes and leaves the
         // upload to us. It is rewritten whenever the descriptor sets change, which is every
