@@ -67,6 +67,7 @@ namespace RT64 {
         RtStageBindRoot = 1u << 6,  // the root signature and descriptor sets bound before traceRays
         RtStageBindBvh = 1u << 7,   // the top level structure bound into the common set
         RtStageBindRtViews = 1u << 8,  // the RT textures and buffers bound into the common set
+        RtStageExtraScenes = 1u << 9,  // dispatches for scenes the resources were not built for
         RtStageAll = 0xFFFFFFFFu
     };
 
@@ -812,6 +813,14 @@ namespace RT64 {
     }
 
     void FramebufferRenderer::submitRaytracingScene(RenderWorker *worker, RenderTarget *colorTarget, const RaytracingScene &rtScene) {
+        // The acceleration structure, the binding table and the output buffers are built
+        // once per frame, for the one scene endFramebuffers picks (:1786-1800, and the FIXME
+        // above it). This is called for every framebuffer that produced a scene, so a frame
+        // with two of them dispatches the second against resources built for the first.
+        if (!(rtStageMask() & RtStageExtraScenes) && (&rtScene != submittedRtScene)) {
+            return;
+        }
+
         // Once, on the first frame that actually traces. Whether a frame reaches this
         // at all is the first question worth answering when the path tracer appears to
         // do nothing, and it is not otherwise observable from outside: enabling
@@ -1906,6 +1915,7 @@ namespace RT64 {
             shaderUploads.push_back({ &rtResources->rtParams, { 0, 1 }, sizeof(interop::RaytracingParams), RenderBufferFlag::CONSTANT, { }, &rtResources->rtParamsBuffer });
             shaderUploads.push_back({ chosenRtScene->interleavedRasters.data(), { 0, chosenRtScene->interleavedRasters.size() }, sizeof(interop::InterleavedRaster), RenderBufferFlag::STORAGE, { }, &interleavedRastersBuffer });
 
+            submittedRtScene = chosenRtScene;
             updateRaytracingScene(worker, *chosenRtScene);
             shaderViewRtEnabled = true;
         }

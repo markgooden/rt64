@@ -105,6 +105,10 @@ namespace RT64 {
 
 #   if RT_ENABLED
         const RenderTexture *blueNoiseTexture = nullptr;
+        // The scene this frame's acceleration structure, binding table and output buffers
+        // were built for. A frame can produce more than one scene and only one set of
+        // resources, so the others have nothing valid to dispatch against.
+        const RaytracingScene *submittedRtScene = nullptr;
         const RaytracingState *rtState = nullptr;
         const RenderPipelineLayout *rtPipelineLayout = nullptr;
         std::unique_ptr<RaytracingResources> rtResources;
