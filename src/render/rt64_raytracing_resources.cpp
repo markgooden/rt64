@@ -451,6 +451,50 @@ namespace RT64 {
         // upload to us. It is rewritten whenever the descriptor sets change, which is every
         // frame, so it lives in an upload heap rather than being staged.
         const uint64_t tableSize = uint64_t(shaderBindingTableInfo.tableBufferData.size());
+
+        // One-time dump of what plume actually built. A malformed table is the remaining
+        // explanation for a device that dies only when traceRays runs: every call involved
+        // is valid, so nothing else can see it. Each record starts with a 32 byte shader
+        // identifier, and an all-zero one means the dispatch jumps to nothing.
+        {
+            static bool dumped = false;
+            if (!dumped && (tableSize > 0)) {
+                dumped = true;
+                const auto &g = shaderBindingTableInfo.groups;
+                fprintf(stdout, "rt64: binding table %llu bytes\n", (unsigned long long)tableSize);
+                const struct { const char *name; const RenderShaderBindingGroupInfo *info; uint32_t count; } groups[] = {
+                    { "rayGen", &g.rayGen, uint32_t(rtState->rayGenPrograms.size()) },
+                    { "miss", &g.miss, uint32_t(rtState->missPrograms.size()) },
+                    { "hitGroup", &g.hitGroup, uint32_t(hitGroups.size()) }
+                };
+
+                for (const auto &group : groups) {
+                    fprintf(stdout, "rt64:   %-8s offset %llu stride %llu size %llu, %u records\n", group.name,
+                        (unsigned long long)group.info->offset, (unsigned long long)group.info->stride,
+                        (unsigned long long)group.info->size, group.count);
+
+                    for (uint32_t r = 0; r < group.count; r++) {
+                        const uint64_t at = group.info->offset + uint64_t(r) * group.info->stride;
+                        if ((at + 32) > tableSize) {
+                            fprintf(stdout, "rt64:     [%u] runs past the end of the table\n", r);
+                            continue;
+                        }
+
+                        const uint8_t *id = shaderBindingTableInfo.tableBufferData.data() + at;
+                        bool allZero = true;
+                        for (uint32_t b = 0; b < 32; b++) {
+                            allZero = allZero && (id[b] == 0);
+                        }
+
+                        fprintf(stdout, "rt64:     [%u] at %llu: %02x%02x%02x%02x%02x%02x%02x%02x%s\n", r, (unsigned long long)at,
+                            id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7],
+                            allZero ? "  <-- ALL ZERO, this record dispatches to nothing" : "");
+                    }
+                }
+
+                fflush(stdout);
+            }
+        }
         if (tableSize == 0) {
             return;
         }
