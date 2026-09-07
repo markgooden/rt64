@@ -75,8 +75,17 @@ namespace RT64 {
     struct RaytracingResources {
         // Hit queries recorded per pixel by the any-hit shaders. The frame graph sizes the
         // four hit buffers as textureWidth * textureHeight * MaxHitQueries
-        // (rt64_framebuffer_renderer.cpp:360).
-        static const uint32_t MaxHitQueries = 16;
+        // (rt64_framebuffer_renderer.cpp:360), and binds them with that same compile-time
+        // constant, so it cannot be clamped at allocation time without the views running
+        // off the end of the buffers.
+        //
+        // It costs 30 bytes per query per pixel across the four buffers, which is the
+        // whole reason this number is small. RT64 renders at the window resolution, not
+        // the N64's: at 2880x1980 the original 16 asked for 2.6 GB and killed the driver.
+        // Four keeps that under 700 MB, and four layers of transparency is the usual
+        // choice for the any-hit path this exists to serve - which is not implemented yet,
+        // so nothing reads these buffers at all today.
+        static const uint32_t MaxHitQueries = 4;
 
         // Auto-exposure histogram size, fixed by the shaders that share it
         // (shaders/LuminanceHistogramCS.hlsl:10, shaders/HistogramAverageCS.hlsl:11).
