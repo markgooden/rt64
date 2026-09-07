@@ -84,24 +84,17 @@ namespace RT64 {
         RenderShaderFormat shaderFormat = RenderShaderFormat::UNKNOWN;
         const ShaderLibrary *shaderLibrary = nullptr;
         std::unique_ptr<ShaderCompiler> shaderCompiler;
-        // Two layouts, because the state object uses two root signatures and they are
-        // not the same one.
+        // Bound on the command list and given to the pipeline, both. plume attaches it to
+        // the state object as the local root signature and bakes its descriptor tables into
+        // every shader record (plume_d3d12.cpp:3348-3358, :4083-4093), while the state
+        // object's global root signature is a dummy plume builds itself.
         //
-        // localPipelineLayout carries the real descriptor sets and is what the pipeline
-        // is built with: plume attaches it as the local root signature and bakes its
-        // descriptor tables into every shader record (plume_d3d12.cpp:3348-3358,
-        // :4083-4093).
-        //
-        // pipelineLayout is empty, and is the one the frame graph binds before
-        // traceRays. It has to be, because the global root signature the state object
-        // declares is a dummy plume creates from a default, empty descriptor
-        // (:3813-3815), and the root signature set on the command list has to match the
-        // one the state object was built with. Binding the descriptor-carrying layout
-        // there instead is a mismatch, and a mismatch is what was removing the device
-        // on the first dispatch of every run - with an empty ray generation shader, so
-        // nothing the shader did could account for it.
+        // Binding an empty layout to match that dummy looks more correct and is not:
+        // setDescriptorSet indexes setViewRootIndices by set number, and an empty layout
+        // has none, so the bind walks off the end (:2515-2524). A standalone test against
+        // plume crashed exactly there, and dispatches 120 frames clean with this
+        // arrangement.
         std::unique_ptr<RenderPipelineLayout> pipelineLayout;
-        std::unique_ptr<RenderPipelineLayout> localPipelineLayout;
         std::vector<RaytracingState> states;
         std::atomic<int32_t> activeState = { 0 };
         std::mutex submissionMutex;

@@ -115,12 +115,6 @@ namespace RT64 {
         layoutBuilder.addDescriptorSet(descriptorTextureSet);
         layoutBuilder.addDescriptorSet(descriptorFramebufferSet);
         layoutBuilder.end();
-        localPipelineLayout = layoutBuilder.create(device);
-
-        // The one bound at dispatch: empty, matching the global root signature plume
-        // gives the state object. See the header.
-        layoutBuilder.begin(false, false);
-        layoutBuilder.end();
         pipelineLayout = layoutBuilder.create(device);
 
         std::unique_ptr<RenderShader> libraryShader = device->createShader(libraryBlob, libraryBlobSize, "", shaderFormat);
@@ -148,7 +142,7 @@ namespace RT64 {
         pipelineDesc.librariesCount = 1;
         pipelineDesc.hitGroups = hitGroups;
         pipelineDesc.hitGroupsCount = uint32_t(std::size(hitGroups));
-        pipelineDesc.pipelineLayout = localPipelineLayout.get();
+        pipelineDesc.pipelineLayout = pipelineLayout.get();
 
         // float3 normal, float t, int instanceId.
         pipelineDesc.maxPayloadSize = 6 * sizeof(float);

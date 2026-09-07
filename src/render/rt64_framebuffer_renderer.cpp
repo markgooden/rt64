@@ -65,6 +65,7 @@ namespace RT64 {
         RtStageLuma = 1u << 4,
         RtStagePost = 1u << 5,
         RtStageBindRoot = 1u << 6,  // the root signature and descriptor sets bound before traceRays
+        RtStageBindBvh = 1u << 7,   // the top level structure bound into the common set
         RtStageAll = 0xFFFFFFFFu
     };
 
@@ -396,7 +397,8 @@ namespace RT64 {
             descCommonSet->setBuffer(descCommonSet->gHitColor, rtResources->hitColorBuffer.get(), hitBufferPixelCount * 4, rtResources->hitColorBufferView.get());
             descCommonSet->setBuffer(descCommonSet->gHitNormalFog, rtResources->hitNormalFogBuffer.get(), hitBufferPixelCount * 8, rtResources->hitNormalFogBufferView.get());
             descCommonSet->setBuffer(descCommonSet->gHitInstanceId, rtResources->hitInstanceIdBuffer.get(), hitBufferPixelCount * 2, rtResources->hitInstanceIdBufferView.get());
-            descCommonSet->setAccelerationStructure(descCommonSet->SceneBVH, rtResources->topLevelAS.get());
+            descCommonSet->setAccelerationStructure(descCommonSet->SceneBVH,
+                (rtStageMask() & RtStageBindBvh) ? rtResources->topLevelAS.get() : nullptr);
             descCommonSet->setBuffer(descCommonSet->SceneLights, rtResources->lightsBuffer.get(), sizeof(interop::PointLight) * std::max(rtResources->rtParams.lightsCount, 1U), RenderBufferStructuredView(sizeof(interop::PointLight)));
             descCommonSet->setBuffer(descCommonSet->interleavedRasters, interleavedRastersBuffer.get(), sizeof(interop::InterleavedRaster) * std::max(interleavedRastersCount, 1U), RenderBufferStructuredView(sizeof(interop::InterleavedRaster)));
             descCommonSet->setTexture(descCommonSet->gBlueNoise, blueNoiseTexture, RenderTextureLayout::SHADER_READ);
