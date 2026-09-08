@@ -867,10 +867,14 @@ namespace RT64 {
         // a range that excludes the geometry, and all three are readable here. viewI is
         // printed by row so the row carrying the translation is visible rather than assumed -
         // the shader sees this matrix transposed (shaders/RaytracingLib.hlsl:47-56).
-        if (getenv("PDRT64_RT_DUMPCAM") != nullptr) {
+        const char *dumpCam = getenv("PDRT64_RT_DUMPCAM");
+        if (dumpCam != nullptr) {
+            // The value is the frame interval, so a short driven run can be sampled
+            // finely without a rebuild. PDRT64_RT_DUMPCAM=1 alone keeps the old cadence.
+            const int dumpCamEvery = std::max(1, atoi(dumpCam));
             static uint32_t camCalls = 0;
             camCalls++;
-            if ((camCalls < 1200) && ((camCalls % 300) == 0)) {
+            if ((camCalls < (dumpCamEvery * 12)) && ((camCalls % dumpCamEvery) == 0)) {
                 fprintf(stderr, "rt64: --- frame call %u ---\n", camCalls);
                 fprintf(stderr, "rt64: cam pos %.3f %.3f %.3f  dir %.3f %.3f %.3f\n",
                     float(Pos.x), float(Pos.y), float(Pos.z),

@@ -478,10 +478,14 @@ namespace RT64 {
 
         // PDRT64_RT_DUMPCAM: the masks the instances carry. TraceRay is issued with 0xFF, so
         // an instance whose mask is 0 is invisible to every ray no matter where it is.
-        if (getenv("PDRT64_RT_DUMPCAM") != nullptr) {
+        const char *dumpCam = getenv("PDRT64_RT_DUMPCAM");
+        if (dumpCam != nullptr) {
+            // The value is the frame interval, so a short driven run can be sampled
+            // finely without a rebuild. PDRT64_RT_DUMPCAM=1 alone keeps the old cadence.
+            const int dumpInstEvery = std::max(1, atoi(dumpCam));
             static uint32_t instCalls = 0;
             instCalls++;
-            if ((instCalls < 1200) && ((instCalls % 300) == 0) && !topLevelASInstances.empty()) {
+            if ((instCalls < (dumpInstEvery * 12)) && ((instCalls % dumpInstEvery) == 0) && !topLevelASInstances.empty()) {
                 fprintf(stderr, "rt64: --- instance call %u ---\n", instCalls);
                 fprintf(stderr, "rt64: %zu top level instances\n", topLevelASInstances.size());
                 for (size_t d = 0; (d < topLevelASInstances.size()) && (d < 8); d++) {

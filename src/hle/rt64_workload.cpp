@@ -197,10 +197,14 @@ namespace RT64 {
         // PDRT64_RT_DUMPCAM: where the geometry actually is. The primary rays start at the
         // camera the projection processor recovered, so the object space extent and the
         // transforms applied to it are what say whether a ray could reach it at all.
-        if (getenv("PDRT64_RT_DUMPCAM") != nullptr) {
+        const char *dumpCam = getenv("PDRT64_RT_DUMPCAM");
+        if (dumpCam != nullptr) {
+            // The value is the frame interval, so a short driven run can be sampled
+            // finely without a rebuild. PDRT64_RT_DUMPCAM=1 alone keeps the old cadence.
+            const int dumpGeomEvery = std::max(1, atoi(dumpCam));
             static uint32_t geomCalls = 0;
             geomCalls++;
-            if ((geomCalls < 1200) && ((geomCalls % 300) == 0) && !drawData.posFloats.empty()) {
+            if ((geomCalls < (dumpGeomEvery * 12)) && ((geomCalls % dumpGeomEvery) == 0) && !drawData.posFloats.empty()) {
                 float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
                 const size_t vertexCount = drawData.posFloats.size() / 3;
                 for (size_t v = 0; v < vertexCount; v++) {
@@ -215,9 +219,49 @@ namespace RT64 {
                     geomCalls, vertexCount, lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
                 fprintf(stderr, "rt64: %zu world transforms, %zu viewProj transforms\n",
                     drawData.worldTransforms.size(), drawData.viewProjTransforms.size());
-                for (size_t t = 0; (t < drawData.worldTransforms.size()) && (t < 4); t++) {
-                    const interop::float4x4 &m = drawData.worldTransforms[t];
-                    fprintf(stderr, "rt64:   world %zu translation %.1f %.1f %.1f\n", t, m[3][0], m[3][1], m[3][2]);
+
+                // The centroid and extent of every world transform's translation, rather
+                // than a few by index: indices are per-frame draw order and do not name the
+                // same object twice, but the cloud as a whole is stable. If the view is
+                // folded into these transforms the whole cloud moves rigidly with the
+                // camera; if they are true world space it stays put while the camera moves.
+                // Only a moving camera tells those apart, which is what tools/rtdrive.ps1
+                // is for.
+                if (!drawData.worldTransforms.empty()) {
+                    double sum[3] = { 0.0, 0.0, 0.0 };
+                    float wlo[3] = { 1e30f, 1e30f, 1e30f }, whi[3] = { -1e30f, -1e30f, -1e30f };
+                    for (const interop::float4x4 &m : drawData.worldTransforms) {
+                        for (int a = 0; a < 3; a++) {
+                            sum[a] += m[3][a];
+                            wlo[a] = std::min(wlo[a], m[3][a]);
+                            whi[a] = std::max(whi[a], m[3][a]);
+                        }
+                    }
+
+                    const double n = double(drawData.worldTransforms.size());
+                    fprintf(stderr, "rt64:   world translation centroid %.1f %.1f %.1f\n",
+                        sum[0] / n, sum[1] / n, sum[2] / n);
+                    fprintf(stderr, "rt64:   world translation aabb (%.1f %.1f %.1f) - (%.1f %.1f %.1f)\n",
+                        wlo[0], wlo[1], wlo[2], whi[0], whi[1], whi[2]);
+                }
+
+                // The game's own view-projection, as a witness that the camera actually
+                // moved. This is the matrix that puts world vertices on screen, so if the
+                // camera lives in the projection stack this row changes as the player moves,
+                // and if it lives in the modelview it does not. Reading it next to the world
+                // translation cloud above is what separates the two: exactly one of them can
+                // hold the camera.
+                // Every perspective view-projection, not just the first: index 0 is the 2D
+                // projection the HUD is drawn with and is always identity, which says nothing
+                // about the camera. A perspective matrix is the one with [3][3] == 0.
+                for (size_t v = 0; v < drawData.viewProjTransforms.size(); v++) {
+                    const interop::float4x4 &vp = drawData.viewProjTransforms[v];
+                    if (vp[3][3] != 0.0f) {
+                        continue;
+                    }
+
+                    fprintf(stderr, "rt64:   viewProj[%zu] row3 %.2f %.2f %.2f  row2 %.2f %.2f %.2f\n",
+                        v, vp[3][0], vp[3][1], vp[3][2], vp[2][0], vp[2][1], vp[2][2]);
                 }
 
                 fflush(stderr);
