@@ -34,7 +34,7 @@ struct TriangleAttributes {
 };
 
 // Builds the primary ray for a pixel from the pinhole camera vectors the renderer computes
-// each frame (rt64_framebuffer_renderer.cpp:724-737). cameraU, cameraV and cameraW are
+// each frame (rt64_framebuffer_renderer.cpp:846-863). cameraU, cameraV and cameraW are
 // already scaled by the focal distance and field of view there, so this only has to place
 // the pixel on the image plane.
 static RayDesc primaryRayForPixel(uint2 pixel, uint2 dimensions) {
@@ -45,7 +45,16 @@ static RayDesc primaryRayForPixel(uint2 pixel, uint2 dimensions) {
     screen.y = -screen.y;
 
     RayDesc ray;
-    ray.Origin = float3(RtParams.viewI[3][0], RtParams.viewI[3][1], RtParams.viewI[3][2]);
+
+    // RtParams arrives transposed, so the camera position is viewI's column 3 and not its
+    // row 3. The CPU stores a float4x4 as row-major memory (shared/rt64_hlsl.h:222) and DXC
+    // packs cbuffer matrices column-major, since nothing passes -Zpr. RT64's own shaders
+    // depend on that: RSPWorldCS.hlsl:39 is mul(worldMat, float4(pos, 1.0f)), which only
+    // translates when the translation sits in the HLSL matrix's column 3. Reading row 3
+    // returned (0, 0, 0) for any affine view matrix, so every primary ray started at the
+    // world origin and missed the scene - gDepth came back saturated at farDist over the
+    // whole frame, which is what the Depth debug view showed.
+    ray.Origin = float3(RtParams.viewI[0][3], RtParams.viewI[1][3], RtParams.viewI[2][3]);
     ray.Direction = normalize(screen.x * RtParams.cameraU.xyz + screen.y * RtParams.cameraV.xyz + RtParams.cameraW.xyz);
     ray.TMin = RtParams.nearDist;
     ray.TMax = RtParams.farDist;

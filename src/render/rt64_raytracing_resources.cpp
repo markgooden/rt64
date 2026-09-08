@@ -476,6 +476,25 @@ namespace RT64 {
             topLevelASInstances.emplace_back(instance);
         }
 
+        // PDRT64_RT_DUMPCAM: the masks the instances carry. TraceRay is issued with 0xFF, so
+        // an instance whose mask is 0 is invisible to every ray no matter where it is.
+        if (getenv("PDRT64_RT_DUMPCAM") != nullptr) {
+            static uint32_t instCalls = 0;
+            instCalls++;
+            if ((instCalls < 1200) && ((instCalls % 300) == 0) && !topLevelASInstances.empty()) {
+                fprintf(stderr, "rt64: --- instance call %u ---\n", instCalls);
+                fprintf(stderr, "rt64: %zu top level instances\n", topLevelASInstances.size());
+                for (size_t d = 0; (d < topLevelASInstances.size()) && (d < 8); d++) {
+                    fprintf(stderr, "rt64:   instance %zu mask 0x%02X hitGroup %u cullDisable %d\n",
+                        d, topLevelASInstances[d].instanceMask,
+                        topLevelASInstances[d].instanceContributionToHitGroupIndex,
+                        int(topLevelASInstances[d].cullDisable));
+                }
+
+                fflush(stderr);
+            }
+        }
+
         worker->device->setTopLevelASBuildInfo(topLevelASBuildInfo, topLevelASInstances.data(), uint32_t(topLevelASInstances.size()), false, true);
 
         const uint64_t bufferSize = allocationForSize(topLevelASBuildInfo.accelerationStructureSize);

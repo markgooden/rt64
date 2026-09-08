@@ -862,6 +862,30 @@ namespace RT64 {
         rtParams.cameraV = hlslpp::float4(cameraV, 0.0f);
         rtParams.cameraW = hlslpp::float4(cameraW, 0.0f);
 
+        // PDRT64_RT_DUMPCAM: the camera the primary rays are built from, and the raw viewI,
+        // once. A ray that misses everything can only have a bad origin, a bad direction or
+        // a range that excludes the geometry, and all three are readable here. viewI is
+        // printed by row so the row carrying the translation is visible rather than assumed -
+        // the shader sees this matrix transposed (shaders/RaytracingLib.hlsl:47-56).
+        if (getenv("PDRT64_RT_DUMPCAM") != nullptr) {
+            static uint32_t camCalls = 0;
+            camCalls++;
+            if ((camCalls < 1200) && ((camCalls % 300) == 0)) {
+                fprintf(stderr, "rt64: --- frame call %u ---\n", camCalls);
+                fprintf(stderr, "rt64: cam pos %.3f %.3f %.3f  dir %.3f %.3f %.3f\n",
+                    float(Pos.x), float(Pos.y), float(Pos.z),
+                    float(cameraW.x / FocalDistance), float(cameraW.y / FocalDistance), float(cameraW.z / FocalDistance));
+                fprintf(stderr, "rt64: cam near %.4f far %.4f fov %.4f focal %.4f ulen %.4f\n",
+                    rtParams.nearDist, rtParams.farDist, rtParams.fovRadians, FocalDistance, ulen);
+                for (int r = 0; r < 4; r++) {
+                    fprintf(stderr, "rt64: viewI row %d: %.3f %.3f %.3f %.3f\n", r,
+                        rtParams.viewI[r][0], rtParams.viewI[r][1], rtParams.viewI[r][2], rtParams.viewI[r][3]);
+                }
+
+                fflush(stderr);
+            }
+        }
+
         // Enable light reprojection if denoising is enabled.
 #   ifdef DI_REPROJECTION_SUPPORT
         globalParamsBufferData.diReproject = !rtResources->skipReprojection && denoiserEnabled && (globalParamsBufferData.diSamples > 0) && (rtResources->upscalerMode != UpscaleMode::DLSS) ? 1 : 0;

@@ -194,6 +194,36 @@ namespace RT64 {
     }
     
     void Workload::uploadDrawData(RenderWorker *worker, BufferUploader *bufferUploader) {
+        // PDRT64_RT_DUMPCAM: where the geometry actually is. The primary rays start at the
+        // camera the projection processor recovered, so the object space extent and the
+        // transforms applied to it are what say whether a ray could reach it at all.
+        if (getenv("PDRT64_RT_DUMPCAM") != nullptr) {
+            static uint32_t geomCalls = 0;
+            geomCalls++;
+            if ((geomCalls < 1200) && ((geomCalls % 300) == 0) && !drawData.posFloats.empty()) {
+                float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+                const size_t vertexCount = drawData.posFloats.size() / 3;
+                for (size_t v = 0; v < vertexCount; v++) {
+                    for (int a = 0; a < 3; a++) {
+                        const float c = drawData.posFloats[v * 3 + a];
+                        lo[a] = std::min(lo[a], c);
+                        hi[a] = std::max(hi[a], c);
+                    }
+                }
+
+                fprintf(stderr, "rt64: geom call %u: %zu verts, object aabb (%.1f %.1f %.1f) - (%.1f %.1f %.1f)\n",
+                    geomCalls, vertexCount, lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+                fprintf(stderr, "rt64: %zu world transforms, %zu viewProj transforms\n",
+                    drawData.worldTransforms.size(), drawData.viewProjTransforms.size());
+                for (size_t t = 0; (t < drawData.worldTransforms.size()) && (t < 4); t++) {
+                    const interop::float4x4 &m = drawData.worldTransforms[t];
+                    fprintf(stderr, "rt64:   world %zu translation %.1f %.1f %.1f\n", t, m[3][0], m[3][1], m[3][2]);
+                }
+
+                fflush(stderr);
+            }
+        }
+
         const RenderBufferFlags rtInputFlag = worker->device->getCapabilities().raytracing ? RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT : RenderBufferFlag::NONE;
         bufferUploader->submit(worker, {
             { drawData.posFloats.data(), drawRanges.posFloats, sizeof(float), RenderBufferFlag::FORMATTED, { RenderFormat::R32_FLOAT }, &drawBuffers.positionBuffer },
