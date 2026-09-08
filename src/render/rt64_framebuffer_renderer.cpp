@@ -2143,6 +2143,74 @@ namespace RT64 {
                 }
             }
 
+            // Merge every other scene in the frame that shares the chosen one's camera.
+            //
+            // This was written expecting Perfect Dark's first person frame to be one world
+            // split in two: the colour image switches away from the frame buffer and back
+            // mid-frame, each switch ends a framebuffer pair, and the world looked like 44
+            // draw calls in one pair and 62 in another. It is not. Measured, the two scenes
+            // are 258.9 apart in view and 17.0 in projection - different cameras, not one
+            // camera split - so nothing merges here and the second pair is a separate view
+            // drawn into the same buffer after the world, almost certainly the first person
+            // weapon. Its geometry is in its own camera's space and cannot simply be
+            // concatenated; placing it in the world would need a transform it does not carry.
+            //
+            // The merge is kept because it is the right rule and the frame shape it was
+            // written for is real elsewhere - a world genuinely spread over two pairs with
+            // one camera merges correctly. PDRT64_RT_DUMPFB reports each candidate and the
+            // distance that decided it, so an inert merge stays visible rather than looking
+            // like a merge that worked.
+            //
+            // The instances are safe to concatenate when the cameras do match.
+            // instanceIndices are indices into FramebufferRenderer's own draw call vector,
+            // which is cleared once per frame in resetFramebuffers (:208), and
+            // blasIndexByDrawCall numbers the raytraced draw calls across the whole frame in
+            // the order the meshes were added (rt64_raytracing_resources.cpp:427-433). Both
+            // are frame-wide, so a draw call from another pair already has a bottom level
+            // structure built for it and was simply never placed in the top level one.
+            //
+            // The camera test is the one a projection has to pass to join a scene
+            // (:1704-1710). A scene with a different camera is a different view of the world,
+            // and merging it would put geometry in the structure this camera should not see.
+            //
+            // interleavedRasters are deliberately not merged: they index raster scenes within
+            // one framebuffer, so they are not meaningful across pairs.
+            if (chosenRtScene != nullptr) {
+                const float Threshold = 1e-6f;
+                for (uint32_t i = 0; i < framebufferCount; i++) {
+                    RenderTargetDrawCall &targetDrawCall = framebufferVector[i].renderTargetDrawCall;
+                    if (targetDrawCall.rtScenes.empty()) {
+                        continue;
+                    }
+
+                    RaytracingScene &otherScene = targetDrawCall.rtScenes[0];
+                    if ((&otherScene == chosenRtScene) || otherScene.instanceIndices.empty()) {
+                        continue;
+                    }
+
+                    const float viewDiff = matrixDifference(otherScene.curViewMatrix, chosenRtScene->curViewMatrix);
+                    const float projDiff = matrixDifference(otherScene.curProjMatrix, chosenRtScene->curProjMatrix);
+                    if (getenv("PDRT64_RT_DUMPFB") != nullptr) {
+                        static uint32_t mergeLogs = 0;
+                        if ((++mergeLogs % 120) == 0) {
+                            fprintf(stderr, "rt64: merge candidate: chosen %zu instances, other %zu, viewDiff %.6f projDiff %.6f -> %s\n",
+                                chosenRtScene->instanceIndices.size(), otherScene.instanceIndices.size(),
+                                viewDiff, projDiff,
+                                ((viewDiff < Threshold) && (projDiff < Threshold)) ? "merged" : "camera differs");
+                            fflush(stderr);
+                        }
+                    }
+
+                    if ((viewDiff >= Threshold) || (projDiff >= Threshold)) {
+                        continue;
+                    }
+
+                    chosenRtScene->instanceIndices.insert(chosenRtScene->instanceIndices.end(),
+                        otherScene.instanceIndices.begin(), otherScene.instanceIndices.end());
+                    otherScene.instanceIndices.clear();
+                }
+            }
+
             // Once, if raytracing is on and yet nothing became traceable. Enabling
             // raytracing only makes a scene eligible: it still needs a perspective
             // projection that writes depth (:1462-1463), so a frame of menus or
