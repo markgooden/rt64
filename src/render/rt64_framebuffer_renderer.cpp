@@ -1676,6 +1676,35 @@ namespace RT64 {
         uint32_t vertexTestZFaceIndicesStart = 0;
         int32_t vertexTestZCallIndex = -1;
         RenderViewport viewportClip;
+#       if RT_ENABLED
+        // Only one RT scene per frame is supported, so which projection opens it decides
+        // what gets ray traced at all - every later projection whose matrices differ is
+        // then turned away. Taking whichever came first gave Perfect Dark a scene of one
+        // draw call and two triangles, while the level itself, 124 draw calls in the same
+        // frame, was rejected as incompatible with it. Measured with PDRT64_RT_DUMPPROJ.
+        //
+        // Pick the perspective projection with the most draw calls instead. That is a
+        // heuristic, and it is one until multiple heaps per RT scene make it unnecessary,
+        // but it is a better one than arrival order: the projection carrying the most work
+        // is the one worth tracing, and the small ones are usually a weapon viewmodel, a
+        // sky or a menu element sharing the frame.
+        uint32_t rtProjIndex = UINT32_MAX;
+        uint32_t rtProjCalls = 0;
+        if (p.rtEnabled && fbPair.depthWrite) {
+            for (uint32_t pr = 0; pr < fbPair.projectionCount; pr++) {
+                const Projection &candidate = fbPair.projections[pr];
+                if (candidate.scissorRect.isNull() || (candidate.type != Projection::Type::Perspective)) {
+                    continue;
+                }
+
+                if (candidate.gameCallCount > rtProjCalls) {
+                    rtProjCalls = candidate.gameCallCount;
+                    rtProjIndex = pr;
+                }
+            }
+        }
+#       endif
+
         for (uint32_t pr = 0; (pr < fbPair.projectionCount) && (globalCallIndex < p.maxGameCall); pr++) {
             const Projection &proj = fbPair.projections[pr];
             if (proj.scissorRect.isNull()) {
@@ -1687,6 +1716,13 @@ namespace RT64 {
             // TODO: Use detected scenes logic instead.
             const bool perspProj = (proj.type == Projection::Type::Perspective);
             bool rtProj = p.rtEnabled && perspProj && fbPair.depthWrite && targetDrawCall.rtScenes.empty(); // TODO: Remove the last condition once multiple heaps per RT scene are supported.
+
+            // A projection may only *open* the RT scene if it is the one chosen above. Once a
+            // scene is open the compatibility rule below decides who joins it, so the
+            // projections that share the chosen one's matrices still come along.
+            if (rtProj && rtScene.instanceIndices.empty() && (pr != rtProjIndex)) {
+                rtProj = false;
+            }
 
             // Make sure the matrices are compatible if we're switching to a new projection.
             bool rtProjCompatible = true;
@@ -1700,6 +1736,41 @@ namespace RT64 {
             // TODO: Remove this condition once multiple heaps per RT scene are supported.
             if (rtProj && !rtProjCompatible) {
                 rtProj = false;
+            }
+
+            // PDRT64_RT_DUMPPROJ=<interval>: why each projection is or is not ray traced.
+            // The acceleration structure comes out holding one instance of two triangles,
+            // and rtProj above has four conditions that could each be excluding the level.
+            // Printing the one that actually fails beats narrowing toward it: the log already
+            // says "no perspective projection writing depth" in some frames, which points at
+            // a different condition than the rtScenes TODO does.
+            {
+                const char *dumpProj = getenv("PDRT64_RT_DUMPPROJ");
+                if (dumpProj != nullptr) {
+                    static uint32_t projCalls = 0;
+                    const uint32_t dumpProjEvery = uint32_t(std::max(1, atoi(dumpProj)));
+                    projCalls++;
+
+                    // Bursts of consecutive projections rather than isolated ones, so a whole
+                    // framebuffer pair is visible together and pr reveals the grouping.
+                    if ((projCalls % dumpProjEvery) < 12) {
+                        const char *why = "traced";
+                        if (!p.rtEnabled) { why = "rt disabled"; }
+                        else if (!perspProj) { why = "not perspective"; }
+                        else if (!fbPair.depthWrite) { why = "fb pair does not write depth"; }
+                        else if (!targetDrawCall.rtScenes.empty()) { why = "an RT scene already claimed this frame"; }
+                        else if (!rtProjCompatible) { why = "matrices differ from the open RT scene"; }
+
+                        fprintf(stderr, "rt64: proj %u/%u %-13s calls %4u depthWrite %d  -> %s\n",
+                            pr, fbPair.projectionCount,
+                            (proj.type == Projection::Type::Perspective) ? "perspective" :
+                            (proj.type == Projection::Type::Orthographic) ? "orthographic" :
+                            (proj.type == Projection::Type::Rectangle) ? "rectangle" :
+                            (proj.type == Projection::Type::Triangle) ? "triangle" : "none",
+                            proj.gameCallCount, int(fbPair.depthWrite), why);
+                        fflush(stderr);
+                    }
+                }
             }
 #       endif
             
