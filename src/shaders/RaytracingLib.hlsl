@@ -182,34 +182,14 @@ static float4 sampleTileAtUV(uint globalTileIndex, float2 vertexUV, OtherMode ot
         renderFlagCanDecodeTMEM(renderFlags), 0, renderFlagUsesHDR(renderFlags));
 }
 
-[shader("closesthit")]
-void SurfaceClosestHit(inout SurfacePayload payload, in TriangleAttributes attributes) {
-    payload.instanceId = int(InstanceID());
-    payload.t = RayTCurrent();
+// Everything the combiner needs about one hit, so a closest hit and an any hit agree by
+// construction rather than by two copies staying in step.
+struct SurfaceShading {
+    float3 albedo;
+    float alphaCompareValue;
+};
 
-    const RenderIndices renderIndices = instanceRenderIndices[InstanceID()];
-    const uint indexStart = renderIndices.faceIndicesStart + PrimitiveIndex() * 3;
-    const uint i0 = indexBuffer.Load(indexStart * 4);
-    const uint i1 = indexBuffer.Load((indexStart + 1) * 4);
-    const uint i2 = indexBuffer.Load((indexStart + 2) * 4);
-
-    // posBuffer is the world space position the RSP world compute pass writes, four floats
-    // per vertex, so the normal comes out in world space with no further transform.
-    const float3 p0 = asfloat(posBuffer.Load3(i0 * 16));
-    const float3 p1 = asfloat(posBuffer.Load3(i1 * 16));
-    const float3 p2 = asfloat(posBuffer.Load3(i2 * 16));
-    const float3 geometricNormal = normalize(cross(p1 - p0, p2 - p0));
-
-    // Turned to face the ray. The N64 draws plenty of geometry double sided and the winding
-    // of a back face would otherwise light it from behind.
-    payload.normal = (dot(geometricNormal, WorldRayDirection()) > 0.0f) ? -geometricNormal : geometricNormal;
-
-    // The shaded vertex colour the RSP pass already computed, interpolated across the
-    // triangle. This is the game's own vertex lighting rather than a material albedo, and it
-    // stands in as one until textures and the colour combiner are read here: it is what the
-    // raster path would have started from for the same triangle.
-    const float3 barycentrics = float3(1.0f - attributes.barycentrics.x - attributes.barycentrics.y,
-        attributes.barycentrics.x, attributes.barycentrics.y);
+static SurfaceShading shadeSurface(RenderIndices renderIndices, uint i0, uint i1, uint i2, float3 barycentrics) {
     const float4 c0 = asfloat(shadedColBuffer.Load4(i0 * 16));
     const float4 c1 = asfloat(shadedColBuffer.Load4(i1 * 16));
     const float4 c2 = asfloat(shadedColBuffer.Load4(i2 * 16));
@@ -243,10 +223,6 @@ void SurfaceClosestHit(inout SurfacePayload payload, in TriangleAttributes attri
             renderCMS1(rp.flags), renderCMT1(rp.flags), renderFlagNativeSampler1(rp.flags));
     }
 
-    // The real colour combiner, the same one the raster path runs, with the same inputs.
-    // What stood here before was texture times shade - true of most of Perfect Dark's first
-    // cycle settings and wrong for the rest, since the combiner is a general expression over
-    // these operands rather than one product.
     uint randomSeed = initRand(DispatchRaysIndex().x + DispatchRaysIndex().y * DispatchRaysDimensions().x,
         asuint(RtParams.nearDist), 16);
 
@@ -271,7 +247,90 @@ void SurfaceClosestHit(inout SurfacePayload payload, in TriangleAttributes attri
     float4 combinerColor;
     float alphaCompareValue;
     colorCombiner.run(ccInputs, combinerColor, alphaCompareValue);
-    payload.albedo = combinerColor.rgb;
+
+    SurfaceShading shading;
+    shading.albedo = combinerColor.rgb;
+    shading.alphaCompareValue = alphaCompareValue;
+    return shading;
+}
+
+// The alpha test the raster path applies to a pixel (RasterPS.hlsl:203-213). A rasterized
+// pixel that fails is simply not written; a ray that fails has to leave the hit
+// unregistered, which is what an any hit shader is for.
+static bool alphaTestFails(RenderIndices renderIndices, float alphaCompareValue) {
+    const uint instanceIndex = renderIndices.instanceIndex;
+    const RenderParams rp = DynamicRenderParams[instanceIndex];
+    const OtherMode otherMode = { rp.omL, rp.omH };
+    const uint alphaCompare = otherMode.alphaCompare();
+    if (alphaCompare == G_AC_DITHER) {
+        uint randomSeed = initRand(DispatchRaysIndex().x + DispatchRaysIndex().y * DispatchRaysDimensions().x,
+            asuint(RtParams.farDist), 16);
+        return alphaCompareValue < nextRand(randomSeed);
+    }
+
+    if (alphaCompare == G_AC_THRESHOLD) {
+        return alphaCompareValue < instanceRDPParams[instanceIndex].blendColor.a;
+    }
+
+    return false;
+}
+
+// Reads the triangle a hit landed on. The instance carries its draw call index
+// (rt64_raytracing_resources.cpp:468), so instanceRenderIndices gives where this draw
+// call's triangles begin in the shared index buffer, and PrimitiveIndex() counts triangles
+// from exactly there - the bottom level structure was built over the index buffer starting
+// at that offset (rt64_framebuffer_renderer.cpp:1892) with the vertex buffer whole from
+// zero, so the indices it reads are already global.
+static RenderIndices fetchTriangle(out uint i0, out uint i1, out uint i2) {
+    const RenderIndices renderIndices = instanceRenderIndices[InstanceID()];
+    const uint indexStart = renderIndices.faceIndicesStart + PrimitiveIndex() * 3;
+    i0 = indexBuffer.Load(indexStart * 4);
+    i1 = indexBuffer.Load((indexStart + 1) * 4);
+    i2 = indexBuffer.Load((indexStart + 2) * 4);
+    return renderIndices;
+}
+
+static float3 barycentricsOf(TriangleAttributes attributes) {
+    return float3(1.0f - attributes.barycentrics.x - attributes.barycentrics.y,
+        attributes.barycentrics.x, attributes.barycentrics.y);
+}
+
+[shader("closesthit")]
+void SurfaceClosestHit(inout SurfacePayload payload, in TriangleAttributes attributes) {
+    payload.instanceId = int(InstanceID());
+    payload.t = RayTCurrent();
+
+    uint i0, i1, i2;
+    const RenderIndices renderIndices = fetchTriangle(i0, i1, i2);
+
+    // posBuffer is the world space position the RSP world compute pass writes, four floats
+    // per vertex, so the normal comes out in world space with no further transform.
+    const float3 p0 = asfloat(posBuffer.Load3(i0 * 16));
+    const float3 p1 = asfloat(posBuffer.Load3(i1 * 16));
+    const float3 p2 = asfloat(posBuffer.Load3(i2 * 16));
+    const float3 geometricNormal = normalize(cross(p1 - p0, p2 - p0));
+
+    // Turned to face the ray. The N64 draws plenty of geometry double sided and the winding
+    // of a back face would otherwise light it from behind.
+    payload.normal = (dot(geometricNormal, WorldRayDirection()) > 0.0f) ? -geometricNormal : geometricNormal;
+    payload.albedo = shadeSurface(renderIndices, i0, i1, i2, barycentricsOf(attributes)).albedo;
+}
+
+// Alpha compare, as a hit that never happened.
+//
+// Every mesh is built non-opaque (rt64_framebuffer_renderer.cpp:1892), so this runs for
+// each candidate hit before it is accepted. Without it a texture's cut-out texels trace as
+// solid, and grates, foliage and railings are sheets rather than shapes - and a shadow ray
+// through a railing would be stopped by the whole quad, which is why the shadow hit group
+// gets the same test.
+[shader("anyhit")]
+void SurfaceAnyHit(inout SurfacePayload payload, in TriangleAttributes attributes) {
+    uint i0, i1, i2;
+    const RenderIndices renderIndices = fetchTriangle(i0, i1, i2);
+    const SurfaceShading shading = shadeSurface(renderIndices, i0, i1, i2, barycentricsOf(attributes));
+    if (alphaTestFails(renderIndices, shading.alphaCompareValue)) {
+        IgnoreHit();
+    }
 }
 
 [shader("miss")]
@@ -286,6 +345,16 @@ void SurfaceMiss(inout SurfacePayload payload) {
 void ShadowClosestHit(inout SurfacePayload payload, in TriangleAttributes attributes) {
     payload.instanceId = int(InstanceID());
     payload.t = RayTCurrent();
+}
+
+[shader("anyhit")]
+void ShadowAnyHit(inout SurfacePayload payload, in TriangleAttributes attributes) {
+    uint i0, i1, i2;
+    const RenderIndices renderIndices = fetchTriangle(i0, i1, i2);
+    const SurfaceShading shading = shadeSurface(renderIndices, i0, i1, i2, barycentricsOf(attributes));
+    if (alphaTestFails(renderIndices, shading.alphaCompareValue)) {
+        IgnoreHit();
+    }
 }
 
 [shader("miss")]

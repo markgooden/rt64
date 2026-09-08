@@ -131,10 +131,17 @@ namespace RT64 {
         symbols.emplace_back(RenderRaytracingPipelineLibrarySymbol("SurfaceClosestHit", RenderRaytracingPipelineLibrarySymbolType::CLOSEST_HIT));
         symbols.emplace_back(RenderRaytracingPipelineLibrarySymbol("ShadowClosestHit", RenderRaytracingPipelineLibrarySymbolType::CLOSEST_HIT));
 
+        // Both hit groups get an any hit shader, which is where alpha compare happens: a
+        // rasterized pixel that fails the test is simply not written, while a ray has to
+        // leave the hit unregistered. The shadow group needs it as much as the surface one,
+        // or a shadow ray through a railing is stopped by the whole quad.
+        symbols.emplace_back(RenderRaytracingPipelineLibrarySymbol("SurfaceAnyHit", RenderRaytracingPipelineLibrarySymbolType::ANY_HIT));
+        symbols.emplace_back(RenderRaytracingPipelineLibrarySymbol("ShadowAnyHit", RenderRaytracingPipelineLibrarySymbolType::ANY_HIT));
+
         const RenderRaytracingPipelineLibrary library(libraryShader.get(), symbols.data(), uint32_t(symbols.size()));
         const RenderRaytracingPipelineHitGroup hitGroups[] = {
-            RenderRaytracingPipelineHitGroup(SurfaceHitGroupName, "SurfaceClosestHit"),
-            RenderRaytracingPipelineHitGroup(ShadowHitGroupName, "ShadowClosestHit")
+            RenderRaytracingPipelineHitGroup(SurfaceHitGroupName, "SurfaceClosestHit", "SurfaceAnyHit"),
+            RenderRaytracingPipelineHitGroup(ShadowHitGroupName, "ShadowClosestHit", "ShadowAnyHit")
         };
 
         RenderRaytracingPipelineDesc pipelineDesc;

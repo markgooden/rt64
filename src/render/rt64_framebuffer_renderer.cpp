@@ -1916,7 +1916,14 @@ namespace RT64 {
                             raytracing.queryMask |= ShadowCatcherRayQueryMask;
                         }
 
-                        const RenderBottomLevelASMesh asMesh(indexRes->at(call.meshDesc.faceIndicesStart *IndexStride), worldPosRes->at(0), RenderFormat::R32_UINT, RenderFormat::R32G32B32_FLOAT, call.callDesc.triangleCount * 3, vertexCount, PosStride, false);
+                        // Opaque unless the draw call actually alpha tests. The any hit
+                        // shader that implements alpha compare has to sample the texture and
+                        // run the colour combiner for every candidate hit, so marking every
+                        // mesh non-opaque would pay that on all of the geometry to serve the
+                        // small part of it that cuts out. It also lets the traversal take the
+                        // opaque path for everything else.
+                        const bool alphaTested = (otherMode.alphaCompare() != G_AC_NONE);
+                        const RenderBottomLevelASMesh asMesh(indexRes->at(call.meshDesc.faceIndicesStart *IndexStride), worldPosRes->at(0), RenderFormat::R32_UINT, RenderFormat::R32G32B32_FLOAT, call.callDesc.triangleCount * 3, vertexCount, PosStride, !alphaTested);
                         rtResources->addBottomLevelASMesh(asMesh);
 
                         if (false) { // TODO: call.shaderDesc.flags.smoothNormal
