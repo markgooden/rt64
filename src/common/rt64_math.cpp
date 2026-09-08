@@ -52,7 +52,20 @@ namespace RT64 {
         v[2][2] = -vp[2][3];
         v[3][2] = -vp[3][3];
 
-        p[2][2] = vp[0][2] / v[0][2];
+        // vp[i][2] is v[i][2] * p[2][2] for each of the first three rows, so any of them
+        // recovers p[2][2] - but v[i][2] is a column of the view's rotation and goes to zero
+        // whenever the camera faces along that axis. Dividing by a fixed row made the result
+        // NaN at those angles, which the guard below then turned into an identity view: the
+        // camera would drop out for the frames a player spent facing down an axis. Divide by
+        // the largest of the three instead, which a rotation guarantees is at least 1/sqrt(3).
+        int largestRow = 0;
+        for (int i = 1; i < 3; i++) {
+            if (abs(v[i][2]) > abs(v[largestRow][2])) {
+                largestRow = i;
+            }
+        }
+
+        p[2][2] = vp[largestRow][2] / v[largestRow][2];
         p[3][2] = vp[3][2] - p[2][2] * v[3][2];
 
         p[0][0] = sqrtf(sqr(vp[0][0]) + sqr(vp[1][0]) + sqr(vp[2][0]));
@@ -147,7 +160,25 @@ namespace RT64 {
     }
 
     bool isMatrixViewProj(const hlslpp::float4x4 &m) {
-        return (abs(m[3][3]) >= 1e-6f) && (abs(1.0f - m[3][3]) >= 1e-6f);
+        // A combined view-projection carries the view in its last column. For M = V * P with
+        // the usual N64 perspective projection, whose last column is (0, 0, -1, 0), every
+        // M[i][3] is -V[i][2]. A projection with no view in it therefore has exactly
+        // (0, 0, -1, 0) there, and any deviation means a view is baked in.
+        //
+        // The original test asked only whether M[3][3] was neither 0 nor 1. That is
+        // -V[3][2], the view's *translation* along its own forward axis, so it detects a
+        // view that moves and misses one that only rotates. Perfect Dark loads exactly the
+        // second kind: it keeps the camera rotation on the projection stack and the camera
+        // translation in the modelview, so M[3][3] is 0, the decomposition never ran, and
+        // the rotation stayed inside the projection matrix where nothing reads it.
+        //
+        // A view that is purely a roll about the forward axis still reads as no view here,
+        // because a roll leaves that column at (0, 0, 1). Detecting it would need the other
+        // two columns, which a projection scales and a view does not, and no game seen so
+        // far sends one.
+        const bool translated = (abs(m[3][3]) >= 1e-6f) && (abs(1.0f - m[3][3]) >= 1e-6f);
+        const bool rotated = (abs(m[0][3]) >= 1e-6f) || (abs(m[1][3]) >= 1e-6f) || (abs(1.0f + m[2][3]) >= 1e-6f);
+        return translated || rotated;
     }
 
     hlslpp::float4x4 lerpMatrix(const hlslpp::float4x4 &a, const hlslpp::float4x4 &b, float t) {
