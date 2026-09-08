@@ -1772,20 +1772,24 @@ namespace RT64 {
                     // Bursts of consecutive projections rather than isolated ones, so a whole
                     // framebuffer pair is visible together and pr reveals the grouping.
                     if ((projCalls % dumpProjEvery) < 12) {
-                        const char *why = "traced";
+                        // "OPENED" is the projection that claimed the frame's single RT
+                        // scene; "joined" shares its matrices and came along. Which one
+                        // opens the scene is the whole game, so it has to be visible.
+                        const char *why = rtScene.instanceIndices.empty() ? "OPENED" : "joined";
                         if (!p.rtEnabled) { why = "rt disabled"; }
                         else if (!perspProj) { why = "not perspective"; }
                         else if (!fbPair.depthWrite) { why = "fb pair does not write depth"; }
                         else if (!targetDrawCall.rtScenes.empty()) { why = "an RT scene already claimed this frame"; }
+                        else if (rtScene.instanceIndices.empty() && (pr != rtProjIndex)) { why = "not the chosen projection"; }
                         else if (!rtProjCompatible) { why = "matrices differ from the open RT scene"; }
 
-                        fprintf(stderr, "rt64: proj %u/%u %-13s calls %4u depthWrite %d  -> %s\n",
+                        fprintf(stderr, "rt64: proj %u/%u %-13s calls %4u chosen %u  -> %s\n",
                             pr, fbPair.projectionCount,
                             (proj.type == Projection::Type::Perspective) ? "perspective" :
                             (proj.type == Projection::Type::Orthographic) ? "orthographic" :
                             (proj.type == Projection::Type::Rectangle) ? "rectangle" :
                             (proj.type == Projection::Type::Triangle) ? "triangle" : "none",
-                            proj.gameCallCount, int(fbPair.depthWrite), why);
+                            proj.gameCallCount, rtProjIndex, why);
                         fflush(stderr);
                     }
                 }
@@ -1821,6 +1825,11 @@ namespace RT64 {
                 viewportClip = convertViewportRect(viewport.rect(viewportClipRatios), p.resolutionScale, p.fbWidth, projInvRatioScale, extOriginPercentage, 0.0f, viewportOrigin, viewportOrigin);
             }
 
+            // PDRT64_RT_DUMPPROJ: what the projection's game calls actually become. A
+            // projection with 124 game calls producing a scene of 12 instances means most
+            // of them are not turning into ray traced draw calls, and the tally says which
+            // type they take instead.
+            uint32_t typeTally[8] = {};
             for (uint32_t d = 0; (d < proj.gameCallCount) && (globalCallIndex < p.maxGameCall); d++) {
                 const GameCall &call = proj.gameCalls[d];
                 renderIndices.instanceIndex = call.callDesc.callIndex;
@@ -2064,8 +2073,27 @@ namespace RT64 {
                     rasterScene.instanceIndices.push_back(instanceIndex);
                 }
 
+                typeTally[uint32_t(instanceDrawCall.type) & 7]++;
                 instanceDrawCallVector.push_back(instanceDrawCall);
                 globalCallIndex++;
+            }
+
+            if (getenv("PDRT64_RT_DUMPPROJ") != nullptr) {
+                static uint32_t tallyCalls = 0;
+                tallyCalls++;
+                if ((tallyCalls % 400) < 12) {
+                    static const char *typeNames[8] = { "unknown", "raytracing", "indexedTris",
+                        "rawTris", "regularRect", "fillRect", "vertexTestZ", "?" };
+                    fprintf(stderr, "rt64:   proj %u types:", pr);
+                    for (uint32_t t = 0; t < 7; t++) {
+                        if (typeTally[t] > 0) {
+                            fprintf(stderr, " %s %u", typeNames[t], typeTally[t]);
+                        }
+                    }
+
+                    fprintf(stderr, "\n");
+                    fflush(stderr);
+                }
             }
         }
 
