@@ -221,24 +221,6 @@ namespace RT64 {
             GPUTiles = builder.addStructuredBuffer(4);
             instanceRenderIndices = builder.addStructuredBuffer(5);
             DynamicRenderParams = builder.addStructuredBuffer(6);
-            gLinearWrapWrapSampler = builder.addImmutableSampler(7, samplerLibrary.linear.wrapWrap.get());
-            gLinearWrapMirrorSampler = builder.addImmutableSampler(8, samplerLibrary.linear.wrapMirror.get());
-            gLinearWrapClampSampler = builder.addImmutableSampler(9, samplerLibrary.linear.wrapClamp.get());
-            gLinearMirrorWrapSampler = builder.addImmutableSampler(10, samplerLibrary.linear.mirrorWrap.get());
-            gLinearMirrorMirrorSampler = builder.addImmutableSampler(11, samplerLibrary.linear.mirrorMirror.get());
-            gLinearMirrorClampSampler = builder.addImmutableSampler(12, samplerLibrary.linear.mirrorClamp.get());
-            gLinearClampWrapSampler = builder.addImmutableSampler(13, samplerLibrary.linear.clampWrap.get());
-            gLinearClampMirrorSampler = builder.addImmutableSampler(14, samplerLibrary.linear.clampMirror.get());
-            gLinearClampClampSampler = builder.addImmutableSampler(15, samplerLibrary.linear.clampClamp.get());
-            gNearestWrapWrapSampler = builder.addImmutableSampler(16, samplerLibrary.nearest.wrapWrap.get());
-            gNearestWrapMirrorSampler = builder.addImmutableSampler(17, samplerLibrary.nearest.wrapMirror.get());
-            gNearestWrapClampSampler = builder.addImmutableSampler(18, samplerLibrary.nearest.wrapClamp.get());
-            gNearestMirrorWrapSampler = builder.addImmutableSampler(19, samplerLibrary.nearest.mirrorWrap.get());
-            gNearestMirrorMirrorSampler = builder.addImmutableSampler(20, samplerLibrary.nearest.mirrorMirror.get());
-            gNearestMirrorClampSampler = builder.addImmutableSampler(21, samplerLibrary.nearest.mirrorClamp.get());
-            gNearestClampWrapSampler = builder.addImmutableSampler(22, samplerLibrary.nearest.clampWrap.get());
-            gNearestClampMirrorSampler = builder.addImmutableSampler(23, samplerLibrary.nearest.clampMirror.get());
-            gNearestClampClampSampler = builder.addImmutableSampler(24, samplerLibrary.nearest.clampClamp.get());
             RtParams = builder.addConstantBuffer(25);
             SceneBVH = raytracing ? builder.addAccelerationStructure(26) : 0;
             posBuffer = builder.addByteAddressBuffer(27);
@@ -282,6 +264,33 @@ namespace RT64 {
             gFilteredDirectLight = builder.addReadWriteTexture(65);
             gFilteredIndirectLight = builder.addReadWriteTexture(66);
             gBlueNoise = builder.addTexture(67);
+            // Immutable samplers must come after every view binding in the set. plume turns
+            // them into static samplers and filters them out of the view descriptor table
+            // (plume_d3d12.cpp:3509-3529, which never advances viewTableOffset for them), but
+            // D3D12DescriptorSet still allocates a view heap slot for each one
+            // (plume_d3d12.cpp:905-919, where isDynamicSampler requires a null immutable
+            // sampler). With these 18 declared in the middle, every binding after them was
+            // written 18 slots above where the root signature tells the shader to read, so
+            // the shader read a slot nothing had written. Latent on the raster path, where
+            // nothing past the samplers is ever bound or read (rt64_framebuffer_renderer.cpp:362).
+            gLinearWrapWrapSampler = builder.addImmutableSampler(7, samplerLibrary.linear.wrapWrap.get());
+            gLinearWrapMirrorSampler = builder.addImmutableSampler(8, samplerLibrary.linear.wrapMirror.get());
+            gLinearWrapClampSampler = builder.addImmutableSampler(9, samplerLibrary.linear.wrapClamp.get());
+            gLinearMirrorWrapSampler = builder.addImmutableSampler(10, samplerLibrary.linear.mirrorWrap.get());
+            gLinearMirrorMirrorSampler = builder.addImmutableSampler(11, samplerLibrary.linear.mirrorMirror.get());
+            gLinearMirrorClampSampler = builder.addImmutableSampler(12, samplerLibrary.linear.mirrorClamp.get());
+            gLinearClampWrapSampler = builder.addImmutableSampler(13, samplerLibrary.linear.clampWrap.get());
+            gLinearClampMirrorSampler = builder.addImmutableSampler(14, samplerLibrary.linear.clampMirror.get());
+            gLinearClampClampSampler = builder.addImmutableSampler(15, samplerLibrary.linear.clampClamp.get());
+            gNearestWrapWrapSampler = builder.addImmutableSampler(16, samplerLibrary.nearest.wrapWrap.get());
+            gNearestWrapMirrorSampler = builder.addImmutableSampler(17, samplerLibrary.nearest.wrapMirror.get());
+            gNearestWrapClampSampler = builder.addImmutableSampler(18, samplerLibrary.nearest.wrapClamp.get());
+            gNearestMirrorWrapSampler = builder.addImmutableSampler(19, samplerLibrary.nearest.mirrorWrap.get());
+            gNearestMirrorMirrorSampler = builder.addImmutableSampler(20, samplerLibrary.nearest.mirrorMirror.get());
+            gNearestMirrorClampSampler = builder.addImmutableSampler(21, samplerLibrary.nearest.mirrorClamp.get());
+            gNearestClampWrapSampler = builder.addImmutableSampler(22, samplerLibrary.nearest.clampWrap.get());
+            gNearestClampMirrorSampler = builder.addImmutableSampler(23, samplerLibrary.nearest.clampMirror.get());
+            gNearestClampClampSampler = builder.addImmutableSampler(24, samplerLibrary.nearest.clampClamp.get());
             builder.end();
 
             if (device != nullptr) {
@@ -441,7 +450,6 @@ namespace RT64 {
 
         RaytracingComposeDescriptorSet(const SamplerLibrary &samplerLibrary, RenderDevice *device = nullptr) {
             builder.begin();
-            gSampler = builder.addImmutableSampler(0, samplerLibrary.linear.clampClamp.get());
             gFlow = builder.addTexture(1);
             gDiffuse = builder.addTexture(2);
             gDirectLight = builder.addTexture(3);
@@ -449,6 +457,11 @@ namespace RT64 {
             gReflection = builder.addTexture(5);
             gRefraction = builder.addTexture(6);
             gTransparent = builder.addTexture(7);
+            // Immutable samplers go last. They become static samplers in the root signature and
+            // are left out of the view table, but the descriptor set still spends a view heap
+            // slot on each one, so any view declared after one is written to the wrong slot.
+            // See the note in FramebufferRendererDescriptorCommonSet.
+            gSampler = builder.addImmutableSampler(0, samplerLibrary.linear.clampClamp.get());
             builder.end();
 
             if (device != nullptr) {
