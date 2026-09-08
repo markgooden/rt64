@@ -145,7 +145,10 @@ namespace RT64 {
         pipelineDesc.pipelineLayout = pipelineLayout.get();
 
         // float3 normal, float t, int instanceId.
-        pipelineDesc.maxPayloadSize = 6 * sizeof(float);
+        // normal, albedo, t and instance id. Six floats fitted the placeholder payload that
+        // carried no surface colour; a closest hit that reads the vertex attributes needs
+        // eight.
+        pipelineDesc.maxPayloadSize = 8 * sizeof(float);
 
         // Primary visibility only, so no ray is cast from inside a hit shader yet.
         pipelineDesc.maxRecursionDepth = 1;

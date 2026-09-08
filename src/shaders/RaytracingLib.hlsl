@@ -23,6 +23,7 @@
 
 struct SurfacePayload {
     float3 normal;
+    float3 albedo;
     float t;
     int instanceId;
 };
@@ -69,6 +70,7 @@ void PrimaryRayGen() {
 
     SurfacePayload payload;
     payload.normal = float3(0.0f, 0.0f, 0.0f);
+    payload.albedo = float3(0.0f, 0.0f, 0.0f);
     payload.t = -1.0f;
     payload.instanceId = -1;
 
@@ -94,7 +96,11 @@ void PrimaryRayGen() {
     // (shaders/ComposePS.hlsl:19-25), so whatever the shading passes have not written yet
     // must read as nothing rather than as last frame's contents.
     gShadingSpecular[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
-    gDiffuse[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    // The surface colour where the ray landed. Nothing lights it yet - the direct and
+    // indirect passes are still stubs - so this is the albedo on its own, which is what the
+    // Diffuse debug view is for.
+    gDiffuse[pixel] = float4(payload.albedo, 1.0f);
     gFlow[pixel] = float2(0.0f, 0.0f);
     gReactiveMask[pixel] = 0.0f;
     gLockMask[pixel] = 0.0f;
@@ -126,17 +132,44 @@ void RefractionRayGen() {
     gTransparent[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 }
 
+// Fetches the surface where the ray struck it. The instance carries its draw call index
+// (rt64_raytracing_resources.cpp:468), so instanceRenderIndices gives where this draw
+// call's triangles begin in the shared index buffer, and PrimitiveIndex() counts triangles
+// from exactly there - the bottom level structure was built over the index buffer starting
+// at that offset (rt64_framebuffer_renderer.cpp:1892) with the vertex buffer whole from
+// zero, so the indices it reads are already global.
 [shader("closesthit")]
 void SurfaceClosestHit(inout SurfacePayload payload, in TriangleAttributes attributes) {
     payload.instanceId = int(InstanceID());
     payload.t = RayTCurrent();
 
-    // A geometric normal from the triangle's own vertices would need this draw call's offset
-    // into the shared index buffer, which the instance does not carry yet. Until the vertex
-    // fetch convention is settled, the normal faces the ray, which is enough for the
-    // instance ID and shading position views to be read honestly and visibly wrong for the
-    // normal view rather than plausibly wrong.
-    payload.normal = -WorldRayDirection();
+    const RenderIndices renderIndices = instanceRenderIndices[InstanceID()];
+    const uint indexStart = renderIndices.faceIndicesStart + PrimitiveIndex() * 3;
+    const uint i0 = indexBuffer.Load(indexStart * 4);
+    const uint i1 = indexBuffer.Load((indexStart + 1) * 4);
+    const uint i2 = indexBuffer.Load((indexStart + 2) * 4);
+
+    // posBuffer is the world space position the RSP world compute pass writes, four floats
+    // per vertex, so the normal comes out in world space with no further transform.
+    const float3 p0 = asfloat(posBuffer.Load3(i0 * 16));
+    const float3 p1 = asfloat(posBuffer.Load3(i1 * 16));
+    const float3 p2 = asfloat(posBuffer.Load3(i2 * 16));
+    const float3 geometricNormal = normalize(cross(p1 - p0, p2 - p0));
+
+    // Turned to face the ray. The N64 draws plenty of geometry double sided and the winding
+    // of a back face would otherwise light it from behind.
+    payload.normal = (dot(geometricNormal, WorldRayDirection()) > 0.0f) ? -geometricNormal : geometricNormal;
+
+    // The shaded vertex colour the RSP pass already computed, interpolated across the
+    // triangle. This is the game's own vertex lighting rather than a material albedo, and it
+    // stands in as one until textures and the colour combiner are read here: it is what the
+    // raster path would have started from for the same triangle.
+    const float3 barycentrics = float3(1.0f - attributes.barycentrics.x - attributes.barycentrics.y,
+        attributes.barycentrics.x, attributes.barycentrics.y);
+    const float3 c0 = asfloat(shadedColBuffer.Load4(i0 * 16)).rgb;
+    const float3 c1 = asfloat(shadedColBuffer.Load4(i1 * 16)).rgb;
+    const float3 c2 = asfloat(shadedColBuffer.Load4(i2 * 16)).rgb;
+    payload.albedo = c0 * barycentrics.x + c1 * barycentrics.y + c2 * barycentrics.z;
 }
 
 [shader("miss")]
@@ -144,6 +177,7 @@ void SurfaceMiss(inout SurfacePayload payload) {
     payload.instanceId = -1;
     payload.t = -1.0f;
     payload.normal = float3(0.0f, 0.0f, 0.0f);
+    payload.albedo = float3(0.0f, 0.0f, 0.0f);
 }
 
 [shader("closesthit")]

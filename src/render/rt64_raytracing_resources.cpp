@@ -465,7 +465,13 @@ namespace RT64 {
 
             RenderTopLevelASInstance instance;
             instance.bottomLevelAS = blas.buffer->at(0);
-            instance.instanceID = uint32_t(i);
+            // The draw call index, not the position in this scene's instance list. A hit
+            // shader needs its draw call's RenderIndices entry to find where that call's
+            // triangles start in the shared index buffer, and instanceRenderIndices is
+            // indexed by draw call - the two vectors are filled in the same loop, one entry
+            // each per game call (rt64_framebuffer_renderer.cpp:1834-1840). The value is only
+            // ever read back through InstanceID(), and nothing depends on it being dense.
+            instance.instanceID = drawCallIndex;
             instance.instanceMask = drawCall.raytracing.queryMask;
             instance.instanceContributionToHitGroupIndex = drawCall.raytracing.hitGroupIndex;
             instance.cullDisable = drawCall.raytracing.cullDisable;
