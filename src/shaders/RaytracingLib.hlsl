@@ -20,6 +20,7 @@
 
 #include "FbRendererCommon.hlsli"
 #include "FbRendererRT.hlsli"
+#include "TextureSampler.hlsli"
 
 struct SurfacePayload {
     float3 normal;
@@ -169,7 +170,63 @@ void SurfaceClosestHit(inout SurfacePayload payload, in TriangleAttributes attri
     const float3 c0 = asfloat(shadedColBuffer.Load4(i0 * 16)).rgb;
     const float3 c1 = asfloat(shadedColBuffer.Load4(i1 * 16)).rgb;
     const float3 c2 = asfloat(shadedColBuffer.Load4(i2 * 16)).rgb;
-    payload.albedo = c0 * barycentrics.x + c1 * barycentrics.y + c2 * barycentrics.z;
+    const float3 shadeColor = c0 * barycentrics.x + c1 * barycentrics.y + c2 * barycentrics.z;
+
+    // The draw call's render state, reached through its instance index the same way the
+    // raster pixel shader reaches it (RasterPS.hlsl:51).
+    const RenderParams rp = DynamicRenderParams[renderIndices.instanceIndex];
+    const OtherMode otherMode = { rp.omL, rp.omH };
+
+    float3 texelColor = float3(1.0f, 1.0f, 1.0f);
+    if (renderFlagUsesTexture0(rp.flags)) {
+        // genTexCoordBuffer holds the texture coordinates the RSP pass generated, two
+        // floats per vertex.
+        const float2 t0 = asfloat(genTexCoordBuffer.Load2(i0 * 8));
+        const float2 t1 = asfloat(genTexCoordBuffer.Load2(i1 * 8));
+        const float2 t2 = asfloat(genTexCoordBuffer.Load2(i2 * 8));
+        const float2 vertexUV = t0 * barycentrics.x + t1 * barycentrics.y + t2 * barycentrics.z;
+
+        const uint globalTileIndex = renderIndices.rdpTileIndex;
+        RDPTile rdpTile = RDPTiles[globalTileIndex];
+        const GPUTile gpuTile = GPUTiles[globalTileIndex];
+        if (!renderFlagDynamicTiles(rp.flags)) {
+            rdpTile.cms = renderCMS0(rp.flags);
+            rdpTile.cmt = renderCMT0(rp.flags);
+            rdpTile.nativeSampler = renderFlagNativeSampler0(rp.flags);
+        }
+
+        // The same coordinate transform sampleTexture applies before sampling
+        // (TextureSampler.hlsli:218-245), minus the parts that only make sense for a
+        // rasterized rect. It is reproduced rather than called because sampleTexture picks a
+        // mip level from screen space derivatives, and a ray has none.
+        const bool texturePerspective = (otherMode.textPersp() == G_TP_PERSP);
+        const float perspCorrectionMod = texturePerspective ? 1.0f : 0.5f;
+        float2 uvCoord = vertexUV * perspCorrectionMod * float2(rdpTile.shifts, rdpTile.shiftt);
+        if (gpuTileFlagShiftedByHalf(gpuTile.flags)) {
+            uvCoord += float2(0.5f, 0.5f);
+        }
+
+        uvCoord *= gpuTile.tcScale;
+        uvCoord -= (float2(rdpTile.uls, rdpTile.ult) * gpuTile.ulScale) / 4.0f;
+
+        const uint filter = otherMode.textFilt();
+        const bool filterBilerp = (filter != G_TF_POINT) && (otherMode.cycleType() != G_CYC_COPY);
+        const bool filterAverage = (filter == G_TF_AVERAGE);
+
+        // Mip zero always. Choosing a level needs the ray's footprint, which is ray
+        // differentials or a cone width carried in the payload - worth doing, and a separate
+        // piece of work from getting the right texel on the surface at all.
+        const float4 sampled = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage,
+            renderFlagLinearFiltering(rp.flags), uvCoord, otherMode.textLUT(),
+            renderFlagCanDecodeTMEM(rp.flags), 0, renderFlagUsesHDR(rp.flags));
+
+        texelColor = sampled.rgb;
+    }
+
+    // Texture times shade, which is what the great majority of Perfect Dark's combiner
+    // settings amount to for the first cycle. The real colour combiner is the next piece;
+    // this is the one term that gets the surface looking like itself.
+    payload.albedo = texelColor * shadeColor;
 }
 
 [shader("miss")]
