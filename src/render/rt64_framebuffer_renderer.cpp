@@ -2128,6 +2128,16 @@ namespace RT64 {
             //
             // Still one scene per frame, so this only chooses better; merging the pairs is
             // the real fix and is the FIXME above.
+            // PDRT64_RT_SCENEPICK=<n>: trace the n-th scene in the frame instead of the
+            // largest, so the ones that are not chosen can be looked at. Only one scene is
+            // traced, so a scene that is never chosen is otherwise invisible, and guessing
+            // what it holds is how the last two conclusions went wrong.
+            const char *scenePick = getenv("PDRT64_RT_SCENEPICK");
+            const int pickIndex = (scenePick != nullptr) ? atoi(scenePick) : -1;
+            int sceneOrdinal = 0;
+            Framebuffer *pickedFramebuffer = nullptr;
+            RaytracingScene *pickedRtScene = nullptr;
+
             size_t chosenInstanceCount = 0;
             for (uint32_t i = 0; i < framebufferCount; i++) {
                 RenderTargetDrawCall &targetDrawCall = framebufferVector[i].renderTargetDrawCall;
@@ -2141,6 +2151,21 @@ namespace RT64 {
                     chosenFramebuffer = &framebufferVector[i];
                     chosenRtScene = &targetDrawCall.rtScenes[0];
                 }
+
+                if (sceneOrdinal++ == pickIndex) {
+                    pickedFramebuffer = &framebufferVector[i];
+                    pickedRtScene = &targetDrawCall.rtScenes[0];
+                }
+            }
+
+            // The pick only replaces the choice when the frame actually has that many
+            // scenes. A frame with fewer would otherwise trace nothing at all, which is a
+            // different thing to be looking at than the scene that was asked for - and it
+            // takes the "no scene was traceable" path on every menu frame before the level
+            // has loaded.
+            if (pickedRtScene != nullptr) {
+                chosenFramebuffer = pickedFramebuffer;
+                chosenRtScene = pickedRtScene;
             }
 
             // Merge every other scene in the frame that shares the chosen one's camera.
