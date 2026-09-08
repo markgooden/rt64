@@ -402,6 +402,24 @@ namespace RT64 {
             descCommonSet->setBuffer(descCommonSet->gHitInstanceId, rtResources->hitInstanceIdBuffer.get(), hitBufferPixelCount * 2, rtResources->hitInstanceIdBufferView.get());
             descCommonSet->setAccelerationStructure(descCommonSet->SceneBVH,
                 (rtStageMask() & RtStageBindBvh) ? rtResources->topLevelAS.get() : nullptr);
+
+            // PDRT64_RT_DUMPBVH: what SceneBVH is actually bound to. Binding a null
+            // acceleration structure is legal and traces nothing, and validation stays
+            // silent about it, so a frame where every ray misses looks identical either
+            // way. Worth noting the order too: this runs inside updateShaderViews, and
+            // updateTopLevelASResources - which creates topLevelAS - runs after it
+            // (:2136), so what is bound here is the structure as it stood last frame.
+            if (getenv("PDRT64_RT_DUMPBVH") != nullptr) {
+                static uint32_t bvhCalls = 0;
+                bvhCalls++;
+                if ((bvhCalls % 120) == 0) {
+                    fprintf(stderr, "rt64: SceneBVH bind %u: topLevelAS %p, stage bit %d, instances %zu\n",
+                        bvhCalls, (const void *)rtResources->topLevelAS.get(),
+                        (rtStageMask() & RtStageBindBvh) ? 1 : 0,
+                        rtResources->topLevelASInstances.size());
+                    fflush(stderr);
+                }
+            }
             descCommonSet->setBuffer(descCommonSet->SceneLights, rtResources->lightsBuffer.get(), sizeof(interop::PointLight) * std::max(rtResources->rtParams.lightsCount, 1U), RenderBufferStructuredView(sizeof(interop::PointLight)));
             descCommonSet->setBuffer(descCommonSet->interleavedRasters, interleavedRastersBuffer.get(), sizeof(interop::InterleavedRaster) * std::max(interleavedRastersCount, 1U), RenderBufferStructuredView(sizeof(interop::InterleavedRaster)));
             descCommonSet->setTexture(descCommonSet->gBlueNoise, blueNoiseTexture, RenderTextureLayout::SHADER_READ);
