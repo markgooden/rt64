@@ -2117,9 +2117,27 @@ namespace RT64 {
         if (rtEnabled) {
             rtResources->updateBottomLevelASResources(worker);
 
+            // Take the scene with the most instances rather than the last one found. Only
+            // one framebuffer is traced, and the last is not the biggest: Perfect Dark's
+            // first person view switches the colour image away from the frame buffer and
+            // back mid-frame, and each switch ends a framebuffer pair, so the world arrives
+            // split across two of them. Measured with PDRT64_RT_DUMPFB - during the opening
+            // camera pan the world is one pair of 232 draw calls and the last-found rule
+            // picks it, while in first person it is 44 calls in one pair and 62 in another
+            // with a one-call detour between, and the rule picked whichever came last.
+            //
+            // Still one scene per frame, so this only chooses better; merging the pairs is
+            // the real fix and is the FIXME above.
+            size_t chosenInstanceCount = 0;
             for (uint32_t i = 0; i < framebufferCount; i++) {
                 RenderTargetDrawCall &targetDrawCall = framebufferVector[i].renderTargetDrawCall;
-                if (!targetDrawCall.rtScenes.empty()) {
+                if (targetDrawCall.rtScenes.empty()) {
+                    continue;
+                }
+
+                const size_t instanceCount = targetDrawCall.rtScenes[0].instanceIndices.size();
+                if ((chosenRtScene == nullptr) || (instanceCount > chosenInstanceCount)) {
+                    chosenInstanceCount = instanceCount;
                     chosenFramebuffer = &framebufferVector[i];
                     chosenRtScene = &targetDrawCall.rtScenes[0];
                 }

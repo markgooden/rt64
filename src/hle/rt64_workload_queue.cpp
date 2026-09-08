@@ -534,6 +534,32 @@ namespace RT64 {
             colorDepthPairs.clear();
 
             const uint32_t fbPairCount = (debuggerRenderer.framebufferIndex >= 0) ? (debuggerRenderer.framebufferIndex + 1) : workload.fbPairCount;
+            // PDRT64_RT_DUMPFB: the frame's framebuffer pairs and why each one exists.
+            // Only one RT scene is traced per render target, so a frame split across several
+            // pairs gets only a fragment of the world into the acceleration structure. That
+            // is what happens in first person and not during the opening pan, and flushReason
+            // is RT64's own record of what ended the previous pair.
+            if (getenv("PDRT64_RT_DUMPFB") != nullptr) {
+                static uint32_t fbDumps = 0;
+                const uint32_t fbEvery = uint32_t(std::max(1, atoi(getenv("PDRT64_RT_DUMPFB"))));
+                fbDumps++;
+                if ((fbDumps % fbEvery) == 0) {
+                    static const char *reasons[] = { "none", "sampling from color", "sampling from depth",
+                        "color image changed", "depth image changed", "display lists ended" };
+                    fprintf(stderr, "rt64: frame has %u framebuffer pairs\n", fbPairCount);
+                    for (uint32_t d = 0; d < fbPairCount; d++) {
+                        const FramebufferPair &pair = workload.fbPairs[d];
+                        const uint32_t r = uint32_t(pair.flushReason);
+                        fprintf(stderr, "rt64:   pair %u: color %08x depth %08x  %u proj  %u calls  depthWrite %d  ended by %s\n",
+                            d, pair.colorImage.address, pair.depthImage.address, pair.projectionCount,
+                            pair.gameCallCount, int(pair.depthWrite),
+                            (r < std::size(reasons)) ? reasons[r] : "?");
+                    }
+
+                    fflush(stderr);
+                }
+            }
+
             for (uint32_t f = 0; f < fbPairCount; f++) {
                 const FramebufferPair &fbPair = workload.fbPairs[f];
 #           if RT_ENABLED
