@@ -1364,6 +1364,10 @@ namespace RT64 {
             worker->commandList->barriers(RenderBarrierStage::GRAPHICS, afterBarriers);
         }
 
+        // Remembered so the traced image can be read back after the frame. It never reaches
+        // RDRAM - see rt64_rt_readback.h - so this pointer is the only handle on it.
+        rtComposeTarget = colorTarget;
+
         // PDRT64_RT_DUMPTARGET: which render target the traced image is composited into.
         // dlreplay hashes RDRAM, which State::fullSync fills by copying each framebuffer
         // pair's colour target back (rt64_state.cpp:1458, :1479). If the target composited

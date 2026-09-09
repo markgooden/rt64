@@ -88,6 +88,12 @@ namespace RT64 {
         RenderPipeline *postBlendDitherNoiseSubPipeline = nullptr;
         RenderPipeline *postBlendDitherNoiseSubNegativePipeline = nullptr;
         std::unique_ptr<FramebufferRendererDescriptorCommonSet> descCommonSet;
+
+#   if RT_ENABLED
+        // The render target the tracer last composited into. The traced image never
+        // reaches RDRAM, so a debug readback needs this handle (rt64_rt_readback.h).
+        RenderTarget *rtComposeTarget = nullptr;
+#   endif
         std::unique_ptr<FramebufferRendererDescriptorTextureSet> descTextureSet;
         std::unique_ptr<RenderTexture> dummyColorTarget;
         std::unique_ptr<RenderTexture> dummyDepthTarget;
