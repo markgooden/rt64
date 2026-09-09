@@ -217,6 +217,21 @@ namespace RT64 {
 
                 fprintf(stderr, "rt64: geom call %u: %zu verts, object aabb (%.1f %.1f %.1f) - (%.1f %.1f %.1f)\n",
                     geomCalls, vertexCount, lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+                // Does the game light anything through the RSP at all? Direct lighting was
+                // built on the assumption that it does, and every pixel came back with a
+                // light count of zero. This says whether that is the game or the reader.
+                {
+                    size_t litVertices = 0;
+                    uint32_t maxCount = 0;
+                    for (uint8_t count : drawData.lightCounts) {
+                        litVertices += (count > 0) ? 1 : 0;
+                        maxCount = std::max(maxCount, uint32_t(count));
+                    }
+
+                    fprintf(stderr, "rt64:   rsp lights %zu, lightCounts %zu of which %zu non-zero, max %u\n",
+                        drawData.rspLights.size(), drawData.lightCounts.size(), litVertices, maxCount);
+                }
+
                 fprintf(stderr, "rt64: %zu world transforms, %zu viewProj transforms\n",
                     drawData.worldTransforms.size(), drawData.viewProjTransforms.size());
 
