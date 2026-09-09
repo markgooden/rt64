@@ -115,18 +115,6 @@ void PrimaryRayGen() {
     gNormalRoughness[pixel] = float4(payload.normal, 1.0f);
 }
 
-// The light range a surface was lit by, read out of the per vertex arrays the RSP pass
-// uses. lightIndices is R16_UINT and lightCounts is R8_UINT (rt64_workload.cpp:281-282),
-// while the common set binds both as byte address buffers, so the elements have to be
-// picked out of the words by hand.
-static void lightRangeForVertex(uint vertexIndex, out uint lightIndex, out uint lightCount) {
-    const uint indexWord = srcLightIndices.Load((vertexIndex * 2) & ~3u);
-    lightIndex = ((vertexIndex & 1u) != 0u) ? (indexWord >> 16) : (indexWord & 0xFFFFu);
-
-    const uint countWord = srcLightCounts.Load(vertexIndex & ~3u);
-    lightCount = (countWord >> ((vertexIndex & 3u) * 8u)) & 0xFFu;
-}
-
 // Direct lighting, with ray traced shadows.
 //
 // The lights are the game's own: the RSP light set the vertex pass would have used, taken
@@ -159,55 +147,64 @@ void DirectRayGen() {
     const float3 surfacePosition = shadingPosition.xyz;
     const float3 surfaceNormal = gShadingNormal[pixel].xyz;
 
-    // The light set is per vertex, and a draw call's vertices share it, so the draw call's
-    // first vertex answers for the surface. Reaching it needs no payload: the instance id is
-    // the draw call index (rt64_raytracing_resources.cpp:468).
-    const RenderIndices renderIndices = instanceRenderIndices[instanceId];
-    const uint firstVertex = indexBuffer.Load(renderIndices.faceIndicesStart * 4);
-
-    uint lightIndex, lightCount;
-    lightRangeForVertex(firstVertex, lightIndex, lightCount);
-    // Measured on an in-level frame: 4 RSP lights exist, and 32 of 5878 vertices carry a
-    // non-zero light count. Perfect Dark bakes its level lighting into vertex colours and
-    // uses the RSP light path for a fraction of a percent of its geometry, so this returns
-    // for almost every surface. That is the game, not a failure to find the lights.
+    // SceneLights carries the game's own room lights, gathered port side and handed over
+    // each frame (port/rt64/rt64_lights.h). They are not in the display list: Perfect Dark
+    // bakes its level lighting into vertex colours and its RSP light path covered 32 of
+    // 5878 vertices on an in-level frame, so the RSP set this shader first read was empty
+    // for all but a fraction of a percent of the geometry.
+    const uint lightCount = RtParams.lightsCount;
     if (lightCount == 0) {
         return;
     }
 
-    // The last entry in the range is the ambient term, which is added unconditionally and
-    // casts nothing (RSPProcessCS.hlsl:99-100).
-    const uint ambientIndex = lightIndex + lightCount - 1;
-    float3 accumulated = RSPLightVector[ambientIndex].col;
+    float3 accumulated = float3(0.0f, 0.0f, 0.0f);
 
-    for (uint i = lightIndex; i < ambientIndex; i++) {
-        const RSPLight light = RSPLightVector[i];
+    for (uint i = 0; i < lightCount; i++) {
+        const PointLight light = SceneLights[i];
 
-        float3 toLight;
-        float lightDistance;
-        float3 contribution;
-        if (light.kc > 0) {
-            toLight = light.posDir - surfacePosition;
-            lightDistance = computeLength(toLight);
-            if (lightDistance <= 0.0f) {
-                continue;
-            }
-
-            toLight /= lightDistance;
-            contribution = computeNDotL(surfaceNormal, toLight) * computeAttenuation(lightDistance, light) * light.col;
-        }
-        else {
-            const float directionLength = length(light.posDir);
-            if (directionLength <= 0.0f) {
-                continue;
-            }
-
-            toLight = light.posDir / directionLength;
-            lightDistance = RtParams.farDist;
-            contribution = max(dot(surfaceNormal, toLight), 0.0f) * light.col;
+        float3 toLight = light.position - surfacePosition;
+        const float lightDistance = length(toLight);
+        if (lightDistance <= 0.0f) {
+            continue;
         }
 
-        // Nothing to shadow test if the surface faces away from the light.
+        toLight /= lightDistance;
+
+        // Outside the light's reach. attenuationRadius is derived from the fitting's own
+        // size where the lights are built (rt64_host.cpp), because the game records an
+        // extent but never a range.
+        if (lightDistance >= light.attenuationRadius) {
+            continue;
+        }
+
+        const float nDotL = dot(surfaceNormal, toLight);
+        if (nDotL <= 0.0f) {
+            continue;
+        }
+
+        // The game's lights point somewhere: a ceiling fitting faces down, and lighting the
+        // ceiling above it with the same strength would be wrong. A light with no direction
+        // recorded is treated as omnidirectional rather than as facing along zero.
+        float directionalFalloff = 1.0f;
+        const float directionLength = length(light.direction);
+        if (directionLength > 0.0f) {
+            const float3 lightForward = light.direction / directionLength;
+            directionalFalloff = saturate(dot(lightForward, -toLight));
+        }
+
+        if (directionalFalloff <= 0.0f) {
+            continue;
+        }
+
+        // Inverse square, softened near the source so a surface touching the fitting does
+        // not blow out, and faded to nothing at the edge of the reach so a light does not
+        // end in a visible ring.
+        const float normalizedDistance = lightDistance / light.attenuationRadius;
+        const float radius = max(light.pointRadius, 1.0f);
+        const float falloff = saturate(1.0f - normalizedDistance * normalizedDistance);
+        const float attenuation = falloff * falloff / (1.0f + pow(lightDistance / radius, 2.0f));
+
+        const float3 contribution = light.diffuseColor * (nDotL * directionalFalloff * attenuation);
         if (all(contribution <= 0.0f)) {
             continue;
         }
@@ -216,7 +213,7 @@ void DirectRayGen() {
         shadowRay.Origin = surfacePosition + surfaceNormal * ShadowRayBias;
         shadowRay.Direction = toLight;
         shadowRay.TMin = 0.0f;
-        shadowRay.TMax = lightDistance;
+        shadowRay.TMax = lightDistance - ShadowRayBias;
 
         SurfacePayload shadowPayload;
         shadowPayload.normal = float3(0.0f, 0.0f, 0.0f);

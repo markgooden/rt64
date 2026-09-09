@@ -425,6 +425,7 @@ if (RT64_RAYTRACING)
         "${PROJECT_SOURCE_DIR}/src/render/rt64_raytracing_resources.cpp"
         "${PROJECT_SOURCE_DIR}/src/render/rt64_raytracing_shader_cache.cpp"
         "${PROJECT_SOURCE_DIR}/src/render/rt64_rt_readback.cpp"
+        "${PROJECT_SOURCE_DIR}/src/render/rt64_external_lights.cpp"
         "${PROJECT_SOURCE_DIR}/src/res/bluenoise/LDR_64_64_64_RGB1.cpp"
     )
 endif()

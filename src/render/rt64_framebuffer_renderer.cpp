@@ -6,6 +6,10 @@
 
 #include "rt64_framebuffer_renderer.h"
 
+#if RT_ENABLED
+#include "rt64_external_lights.h"
+#endif
+
 #include "../include/rt64_extended_gbi.h"
 
 #include "common/rt64_elapsed_timer.h"
@@ -2078,8 +2082,20 @@ namespace RT64 {
                             rtScene.lightCount = proj.pointLightCount;
                         }
                         else {
-                            rtScene.pointLights = nullptr;
-                            rtScene.lightCount = 0;
+                            // The stream carries no lights in Perfect Dark, so the game's own
+                            // room lights stand in - gathered port side and handed over
+                            // between frames (rt64_external_lights.h). The projection still
+                            // wins where it has any, because a game that does send lights in
+                            // the stream means them.
+                            const std::vector<interop::PointLight> &externalLights = ExternalLights::get();
+                            if (!externalLights.empty()) {
+                                rtScene.pointLights = externalLights.data();
+                                rtScene.lightCount = uint32_t(externalLights.size());
+                            }
+                            else {
+                                rtScene.pointLights = nullptr;
+                                rtScene.lightCount = 0;
+                            }
                         }
                     }
                     else if (rtProjCompatible && addedRasterScene) {
