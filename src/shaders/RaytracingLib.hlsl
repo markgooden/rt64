@@ -32,6 +32,7 @@ static const float ShadowRayBias = 0.5f;
 struct SurfacePayload {
     float3 normal;
     float3 albedo;
+    float3 ambient;
     float t;
     int instanceId;
 };
@@ -79,6 +80,7 @@ void PrimaryRayGen() {
     SurfacePayload payload;
     payload.normal = float3(0.0f, 0.0f, 0.0f);
     payload.albedo = float3(0.0f, 0.0f, 0.0f);
+    payload.ambient = float3(0.0f, 0.0f, 0.0f);
     payload.t = -1.0f;
     payload.instanceId = -1;
 
@@ -105,10 +107,15 @@ void PrimaryRayGen() {
     // must read as nothing rather than as last frame's contents.
     gShadingSpecular[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-    // The surface colour where the ray landed. Nothing lights it yet - the direct and
-    // indirect passes are still stubs - so this is the albedo on its own, which is what the
-    // Diffuse debug view is for.
-    gDiffuse[pixel] = float4(payload.albedo, 1.0f);
+    // The surface without its baked lighting. The compose pass multiplies this by the light
+    // buffers (ComposePS.hlsl:28), so anything left in here that is really light would be
+    // counted twice the moment there is any.
+    gDiffuse[pixel] = float4(payload.albedo, (payload.instanceId >= 0) ? 1.0f : 0.0f);
+
+    // The baked lighting, seeded into the direct light buffer for DirectRayGen to add to.
+    // With no lights in range this reconstructs exactly what the game draws - albedo times
+    // shade - and a light contributes on top of it rather than instead of it.
+    gDirectLightAccum[pixel] = float4(payload.ambient, 1.0f);
     gFlow[pixel] = float2(0.0f, 0.0f);
     gReactiveMask[pixel] = 0.0f;
     gLockMask[pixel] = 0.0f;
@@ -132,8 +139,10 @@ void PrimaryRayGen() {
 [shader("raygeneration")]
 void DirectRayGen() {
     const uint2 pixel = DispatchRaysIndex().xy;
-    gDirectLightAccum[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
+    // Seeded by PrimaryRayGen with the surface's baked lighting, so every early return here
+    // leaves that in place. Clearing first would throw away the only light most of Perfect
+    // Dark has: the rooms the game lights are the minority.
     const int instanceId = gInstanceId[pixel];
     if (instanceId < 0) {
         return;
@@ -157,7 +166,7 @@ void DirectRayGen() {
         return;
     }
 
-    float3 accumulated = float3(0.0f, 0.0f, 0.0f);
+    float3 accumulated = gDirectLightAccum[pixel].rgb;
 
     for (uint i = 0; i < lightCount; i++) {
         const PointLight light = SceneLights[i];
@@ -218,6 +227,7 @@ void DirectRayGen() {
         SurfacePayload shadowPayload;
         shadowPayload.normal = float3(0.0f, 0.0f, 0.0f);
         shadowPayload.albedo = float3(0.0f, 0.0f, 0.0f);
+        shadowPayload.ambient = float3(0.0f, 0.0f, 0.0f);
         shadowPayload.t = -1.0f;
         shadowPayload.instanceId = -1;
 
@@ -302,7 +312,13 @@ static float4 sampleTileAtUV(uint globalTileIndex, float2 vertexUV, OtherMode ot
 // Everything the combiner needs about one hit, so a closest hit and an any hit agree by
 // construction rather than by two copies staying in step.
 struct SurfaceShading {
+    // The surface's own colour, with the shade term taken out of it.
     float3 albedo;
+
+    // The shade term on its own: the vertex colour the RSP pass computed, which in Perfect
+    // Dark is where the level's baked lighting lives. It is light, not material, so it
+    // belongs with the lighting rather than multiplied into the albedo.
+    float3 ambient;
     float alphaCompareValue;
 };
 
@@ -365,8 +381,24 @@ static SurfaceShading shadeSurface(RenderIndices renderIndices, uint i0, uint i1
     float alphaCompareValue;
     colorCombiner.run(ccInputs, combinerColor, alphaCompareValue);
 
+    // Again with the shade term white, which is what separates the material from the light
+    // baked into it. The combiner is a general expression and not always a product, so the
+    // shade cannot simply be divided back out; running it a second time asks the combiner
+    // itself what the surface looks like unlit. The textures are sampled once and both runs
+    // share them, so this costs an evaluation and no bandwidth.
+    //
+    // The first run keeps the alpha, because alpha compare is a property of the surface as
+    // the game draws it and has nothing to do with the split.
+    ColorCombiner::Inputs albedoInputs = ccInputs;
+    albedoInputs.shadeColor = float4(1.0f, 1.0f, 1.0f, shadeColor.a);
+
+    float4 albedoColor;
+    float albedoAlphaUnused;
+    colorCombiner.run(albedoInputs, albedoColor, albedoAlphaUnused);
+
     SurfaceShading shading;
-    shading.albedo = combinerColor.rgb;
+    shading.albedo = albedoColor.rgb;
+    shading.ambient = shadeColor.rgb;
     shading.alphaCompareValue = alphaCompareValue;
     return shading;
 }
@@ -430,7 +462,10 @@ void SurfaceClosestHit(inout SurfacePayload payload, in TriangleAttributes attri
     // Turned to face the ray. The N64 draws plenty of geometry double sided and the winding
     // of a back face would otherwise light it from behind.
     payload.normal = (dot(geometricNormal, WorldRayDirection()) > 0.0f) ? -geometricNormal : geometricNormal;
-    payload.albedo = shadeSurface(renderIndices, i0, i1, i2, barycentricsOf(attributes)).albedo;
+
+    const SurfaceShading shading = shadeSurface(renderIndices, i0, i1, i2, barycentricsOf(attributes));
+    payload.albedo = shading.albedo;
+    payload.ambient = shading.ambient;
 }
 
 // Alpha compare, as a hit that never happened.
@@ -456,6 +491,7 @@ void SurfaceMiss(inout SurfacePayload payload) {
     payload.t = -1.0f;
     payload.normal = float3(0.0f, 0.0f, 0.0f);
     payload.albedo = float3(0.0f, 0.0f, 0.0f);
+    payload.ambient = float3(0.0f, 0.0f, 0.0f);
 }
 
 [shader("closesthit")]
