@@ -1454,6 +1454,18 @@ namespace RT64 {
                             depthFb->lastWriteType = Framebuffer::Type::Depth;
                         }
 
+                        // PDRT64_RT_DUMPTARGET: which targets actually reach RDRAM.
+#                   if RT_ENABLED
+                        if (getenv("PDRT64_RT_DUMPTARGET") != nullptr) {
+                            static uint32_t writebackLogs = 0;
+                            if (writebackLogs++ < 8) {
+                                fprintf(stderr, "rt64: writeback  <- colorTarget %p  fb %08x rows %u..%u\n",
+                                    (const void *)colorTarget, colorFb->addressStart, colorRowStart, colorRowEnd);
+                                fflush(stderr);
+                            }
+                        }
+#                   endif
+
                         // Copy results from render targets back to RAM.
                         colorFb->copyRenderTargetToNative(ext.framebufferGraphicsWorker, colorTarget, colorWriteWidth, colorRowStart, colorRowEnd, colorImg.fmt, ditherRandomSeed++, ext.shaderLibrary);
 

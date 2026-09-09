@@ -1364,6 +1364,19 @@ namespace RT64 {
             worker->commandList->barriers(RenderBarrierStage::GRAPHICS, afterBarriers);
         }
 
+        // PDRT64_RT_DUMPTARGET: which render target the traced image is composited into.
+        // dlreplay hashes RDRAM, which State::fullSync fills by copying each framebuffer
+        // pair's colour target back (rt64_state.cpp:1458, :1479). If the target composited
+        // here is not one of those, the traced image never reaches the hash - which is what
+        // PDRT64_RT_VIZ=5 leaving the hash unchanged says, without saying why.
+        if (getenv("PDRT64_RT_DUMPTARGET") != nullptr) {
+            static uint32_t composeLogs = 0;
+            if (composeLogs++ < 8) {
+                fprintf(stderr, "rt64: RT composite -> colorTarget %p\n", (const void *)colorTarget);
+                fflush(stderr);
+            }
+        }
+
         // Set the final render target. Apply the same scissor and viewport that was determined for the raytracing step.
         worker->commandList->setFramebuffer(colorTarget->textureFramebuffer.get());
         worker->commandList->setViewports(rtScene.viewport);
