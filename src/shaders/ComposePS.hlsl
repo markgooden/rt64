@@ -15,6 +15,12 @@ Texture2D<float4> gReflection : register(t5);
 Texture2D<float4> gRefraction : register(t6);
 Texture2D<float4> gTransparent : register(t7);
 
+// What the raster path already drew into this framebuffer's colour target. Bound by
+// submitRaytracingScene, which resolves the target and transitions it for the duration of
+// this draw - compose writes to the output texture, not to the colour target, so reading it
+// here is reading a different resource.
+Texture2D<float4> gBackgroundColor : register(t8);
+
 float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
     float4 diffuse = gDiffuse.SampleLevel(gSampler, uv, 0);
     if (diffuse.a > EPSILON) {
@@ -32,6 +38,15 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         return float4(result, 1.0f);
     }
     else {
-        return LinearToSrgb(float4(diffuse.rgb, 1.0f));
+        // Nothing was traced here, so what belongs at this pixel is whatever the raster path
+        // drew. This used to return diffuse.rgb, which PrimaryRayGen leaves at zero on a miss,
+        // so the composed image was black everywhere the tracer did not cover and the post
+        // process pass painted that over the raster draws underneath it.
+        //
+        // Not run through LinearToSrgb: the value read back is what the raster path wrote to
+        // the colour target, already in the space the final image is in, where diffuse.rgb is
+        // the tracer's linear albedo. Converting it would brighten the untraced half of the
+        // image relative to the traced half.
+        return float4(gBackgroundColor.SampleLevel(gSampler, uv, 0).rgb, 1.0f);
     }
 }

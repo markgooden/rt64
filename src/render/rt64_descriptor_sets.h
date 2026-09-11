@@ -447,6 +447,7 @@ namespace RT64 {
         uint32_t gReflection;
         uint32_t gRefraction;
         uint32_t gTransparent;
+        uint32_t gBackgroundColor;
 
         RaytracingComposeDescriptorSet(const SamplerLibrary &samplerLibrary, RenderDevice *device = nullptr) {
             builder.begin();
@@ -457,6 +458,14 @@ namespace RT64 {
             gReflection = builder.addTexture(5);
             gRefraction = builder.addTexture(6);
             gTransparent = builder.addTexture(7);
+
+            // What the raster path drew into this framebuffer's colour target before the
+            // tracer ran. Compose returns black wherever no geometry was traced and the post
+            // process pass then paints that over the whole target, so every raster draw
+            // ordered before the RT scene is lost - 63 of level.0000's 218 draw calls
+            // (PDRT64_RT_DUMPCOVER).
+            gBackgroundColor = builder.addTexture(8);
+
             // Immutable samplers go last. They become static samplers in the root signature and
             // are left out of the view table, but the descriptor set still spends a view heap
             // slot on each one, so any view declared after one is written to the wrong slot.

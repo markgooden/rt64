@@ -1235,17 +1235,47 @@ namespace RT64 {
         // draw that reads it. D3D12 GPU-based validation flags the compose draw with
         // EXECUTION ERROR #942 GPU_BASED_VALIDATION_INCOMPATIBLE_RESOURCE_STATE (SRV bound
         // while the resource is in UNORDERED_ACCESS), and the read hangs the device.
-        RenderTextureBarrier afterDispatchBarriers[] = {
-            RenderTextureBarrier(rtOutputCur, RenderTextureLayout::COLOR_WRITE),
-            RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE),
-            RenderTextureBarrier(rtResources->diffuseTexture.get(), RenderTextureLayout::SHADER_READ),
-            RenderTextureBarrier(rtResources->reflectionTexture.get(), RenderTextureLayout::SHADER_READ),
-            RenderTextureBarrier(rtResources->refractionTexture.get(), RenderTextureLayout::SHADER_READ),
-            RenderTextureBarrier(rtResources->transparentTexture.get(), RenderTextureLayout::SHADER_READ),
-            RenderTextureBarrier(rtResources->flowTexture.get(), RenderTextureLayout::SHADER_READ)
-        };
+        // The raster background compose reads where nothing was traced: this framebuffer's
+        // own colour target, holding whatever the raster scenes ordered before the RT scene
+        // drew into it. The post process pass is about to paint over all of it, so without
+        // this they are lost for the frame - 63 of level.0000's 218 draw calls.
+        //
+        // Reading it here is safe where reading it from the framebuffer descriptor set is not.
+        // gBackgroundColor in that set is the same target (:1607) and the raster draws bind it
+        // while drawing into it; compose draws into rtResources->outputTexture instead, so for
+        // this one draw the colour target is just another texture.
+        //
+        // resolveTarget returns immediately unless the target is multisampled, in which case
+        // it is the resolved copy that is sampleable - the same call the interleaved rasters
+        // make below.
+        colorTarget->resolveTarget(worker, shaderLibrary);
 
-        worker->commandList->barriers(RenderBarrierStage::GRAPHICS, afterDispatchBarriers, uint32_t(std::size(afterDispatchBarriers)));
+        RenderTexture *backgroundTexture = colorTarget->getResolvedTexture();
+        const bool backgroundIsTarget = (backgroundTexture == colorTarget->texture.get());
+        rtResources->composeSet->setTexture(rtResources->composeSet->gBackgroundColor, backgroundTexture,
+            RenderTextureLayout::SHADER_READ, colorTarget->getResolvedTextureView());
+
+        thread_local std::vector<RenderTextureBarrier> afterDispatchBarriers;
+        afterDispatchBarriers.clear();
+        afterDispatchBarriers.emplace_back(rtOutputCur, RenderTextureLayout::COLOR_WRITE);
+
+        // Without multisampling the background and the post process pass's render target are
+        // the same texture, so it is read for the compose draw and put back to COLOR_WRITE
+        // afterwards. With multisampling they are two textures and the target never leaves
+        // COLOR_WRITE.
+        afterDispatchBarriers.emplace_back(colorTarget->texture.get(),
+            backgroundIsTarget ? RenderTextureLayout::SHADER_READ : RenderTextureLayout::COLOR_WRITE);
+        if (!backgroundIsTarget) {
+            afterDispatchBarriers.emplace_back(backgroundTexture, RenderTextureLayout::SHADER_READ);
+        }
+
+        afterDispatchBarriers.emplace_back(rtResources->diffuseTexture.get(), RenderTextureLayout::SHADER_READ);
+        afterDispatchBarriers.emplace_back(rtResources->reflectionTexture.get(), RenderTextureLayout::SHADER_READ);
+        afterDispatchBarriers.emplace_back(rtResources->refractionTexture.get(), RenderTextureLayout::SHADER_READ);
+        afterDispatchBarriers.emplace_back(rtResources->transparentTexture.get(), RenderTextureLayout::SHADER_READ);
+        afterDispatchBarriers.emplace_back(rtResources->flowTexture.get(), RenderTextureLayout::SHADER_READ);
+
+        worker->commandList->barriers(RenderBarrierStage::GRAPHICS, afterDispatchBarriers);
 
         // Set the output as the current render target.
         worker->commandList->setFramebuffer(rtResources->outputFramebuffer[rtResources->swapBuffers ? 1 : 0].get());
@@ -1266,7 +1296,11 @@ namespace RT64 {
         // Switch resources to the correct states after composing the image. flowTexture is
         // already SHADER_READ by now (afterDispatchBarriers), and the post-process set that
         // reads it next wants that same state, so it is no longer listed here.
+        // colorTarget goes back to COLOR_WRITE for the post process draw. It is only away from
+        // that layout while compose samples it as the background, and re-stating it when it
+        // never moved (the multisampled case) costs nothing.
         RenderTextureBarrier afterComposeBarriers[] = {
+            RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE),
             RenderTextureBarrier(rtOutputCur, RenderTextureLayout::SHADER_READ),
             RenderTextureBarrier(rtResources->filteredDirectLightTexture[1].get(), RenderTextureLayout::GENERAL),
             RenderTextureBarrier(rtResources->filteredIndirectLightTexture[1].get(), RenderTextureLayout::GENERAL),
