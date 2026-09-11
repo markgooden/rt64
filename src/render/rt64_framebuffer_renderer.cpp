@@ -908,6 +908,35 @@ namespace RT64 {
                         rtParams.viewI[r][0], rtParams.viewI[r][1], rtParams.viewI[r][2], rtParams.viewI[r][3]);
                 }
 
+                // The view side of the decomposition. RSP::matrixCommon splits a combined
+                // view-projection with matrixDecomposeViewProj (hle/rt64_rsp.cpp:143-150,
+                // common/rt64_math.cpp:44), which assumes the view part is a pure rotation.
+                // Whether it is, is checkable rather than assumable: a rotation has
+                // orthonormal rows and a zero translation.
+                for (int r = 0; r < 4; r++) {
+                    const hlslpp::float3 row(rtParams.view[r][0], rtParams.view[r][1], rtParams.view[r][2]);
+                    fprintf(stderr, "rt64: view  row %d: %.6f %.6f %.6f %.6f  |xyz| %.6f\n", r,
+                        rtParams.view[r][0], rtParams.view[r][1], rtParams.view[r][2], rtParams.view[r][3],
+                        float(hlslpp::length(row)));
+                }
+
+                // The projection, and the two elements the field of view is read from.
+                // fovFromProj is max(2 * atan(-m[2][3] / m[1][1]), 1e-2f) (common/rt64_math.cpp:240)
+                // and the measured fov is 0.0100 exactly - the clamp, not a computed angle. So
+                // -m[2][3] / m[1][1] came out non-positive or near zero, and which element is
+                // which is the whole question. Printed by row for the same reason viewI is:
+                // this is a layout question and assuming the layout is what produces these.
+                for (int r = 0; r < 4; r++) {
+                    fprintf(stderr, "rt64: proj  row %d: %.6f %.6f %.6f %.6f\n", r,
+                        proj[r][0], proj[r][1], proj[r][2], proj[r][3]);
+                }
+
+                fprintf(stderr, "rt64: fov terms: m[1][1] %.6f  m[2][3] %.6f  ratio %.6f  2*atan %.6f  clamped %d\n",
+                    float(proj[1][1]), float(proj[2][3]),
+                    (float(proj[1][1]) != 0.0f) ? (-float(proj[2][3]) / float(proj[1][1])) : 0.0f,
+                    2.0f * atanf((float(proj[1][1]) != 0.0f) ? (-float(proj[2][3]) / float(proj[1][1])) : 0.0f),
+                    (rtParams.fovRadians <= 1e-2f) ? 1 : 0);
+
                 fflush(stderr);
             }
         }
@@ -2103,6 +2132,26 @@ namespace RT64 {
                         rtScene.curProjMatrix = drawData.modProjTransforms[proj.transformsIndex];
                         rtScene.prevViewMatrix = drawData.prevViewTransforms[proj.transformsIndex];
                         rtScene.prevProjMatrix = drawData.prevProjTransforms[proj.transformsIndex];
+
+                        // PDRT64_RT_DUMPCAM: the combined view-projection this scene's view
+                        // and projection were split out of. The split is the suspect - the
+                        // raster path reads only the combined matrix and never the two halves
+                        // (rt64_workload_queue.cpp:309), so a decomposition that is wrong for
+                        // this game has nothing else exercising it. Printing the input decides
+                        // whether the halves are bad because the input is, or because the
+                        // split is.
+                        if (getenv("PDRT64_RT_DUMPCAM") != nullptr) {
+                            static uint32_t vpLogs = 0;
+                            if (vpLogs++ < 4) {
+                                const interop::float4x4 &vp = drawData.modViewProjTransforms[proj.transformsIndex];
+                                for (int r = 0; r < 4; r++) {
+                                    fprintf(stderr, "rt64: vpIN  row %d: %.6f %.6f %.6f %.6f\n", r,
+                                        vp[r][0], vp[r][1], vp[r][2], vp[r][3]);
+                                }
+
+                                fflush(stderr);
+                            }
+                        }
 
                         const auto &viewport = drawData.rspViewports[proj.transformsIndex];
                         rtScene.viewport = convertViewportRect(viewport.rect(viewportClipRatios), p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, 0.0f, G_EX_ORIGIN_NONE, G_EX_ORIGIN_NONE);
