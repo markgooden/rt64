@@ -1518,7 +1518,11 @@ namespace RT64 {
         // On this thread and this command list deliberately. Doing the copy from the calling
         // thread on a worker of its own faulted inside the copy, because the render thread
         // owns this target and resizes it between frames (rt64_rt_readback.h).
-        rtReadback.record(worker, colorTarget);
+        // Skipped when an interleaved target is being read instead, or it would overwrite the
+        // interleaved capture with the composed image later in the same frame.
+        if (getenv("PDRT64_RT_READBACK_INTERLEAVED") == nullptr) {
+            rtReadback.record(worker, colorTarget);
+        }
 
         // Mark targets for resolve.
         colorTarget->markForResolve();
@@ -1650,6 +1654,20 @@ namespace RT64 {
 
                     submitDepthAccess(worker, fbStorage, false, interleavedDepthState);
                     submitRasterScene(worker, framebuffer, fbStorage, targetDrawCall.rasterScenes[sceneIndex], interleavedDepthState);
+
+                    // PDRT64_RT_READBACK_INTERLEAVED=<n>: read back the n-th interleaved
+                    // colour target instead of the composed image, so what these actually hold
+                    // can be looked at. They are drawn, resolved and given heap indices and
+                    // then read by nothing, so their contents are otherwise invisible - and
+                    // whether the level's ceiling and walls are in here or simply never traced
+                    // is the open question. Recorded here because the target is in COLOR_WRITE
+                    // at this point, which is the layout the readback expects and restores.
+                    if (RtReadback::enabled()) {
+                        const char *whichInterleaved = getenv("PDRT64_RT_READBACK_INTERLEAVED");
+                        if ((whichInterleaved != nullptr) && (uint32_t(atoi(whichInterleaved)) == i)) {
+                            rtReadback.record(worker, colorRenderTarget);
+                        }
+                    }
 
                     // Resolve the interleaved scene.
                     // TODO: Depth textures need to be thrown into a separate view vector for multisampled textures.
