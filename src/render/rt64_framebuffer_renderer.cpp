@@ -1511,19 +1511,6 @@ namespace RT64 {
             worker->commandList->drawInstanced(3, 1, 0, 0);
         }
 
-        // The debug view, when one is on, is part of what the tracer put on screen, so the
-        // readback is recorded after it rather than before - a PDRT64_RT_VIZ run should read
-        // back the view it is displaying.
-        //
-        // On this thread and this command list deliberately. Doing the copy from the calling
-        // thread on a worker of its own faulted inside the copy, because the render thread
-        // owns this target and resizes it between frames (rt64_rt_readback.h).
-        // Skipped when an interleaved target is being read instead, or it would overwrite the
-        // interleaved capture with the composed image later in the same frame.
-        if (getenv("PDRT64_RT_READBACK_INTERLEAVED") == nullptr) {
-            rtReadback.record(worker, colorTarget);
-        }
-
         // Mark targets for resolve.
         colorTarget->markForResolve();
     }
@@ -1692,6 +1679,33 @@ namespace RT64 {
                 submitRasterScene(worker, framebuffer, targetDrawCall.fbStorage, rasterScene, depthState);
             }
         }
+
+#   if RT_ENABLED
+        // The traced image, read back once this framebuffer is finished rather than when the
+        // RT pass ends.
+        //
+        // It used to be recorded inside submitRaytracingScene, which is before any raster
+        // scene ordered after the RT scene has drawn. On menu.0000 that is 75 of 162 draw
+        // calls - the game renders a room and then covers it with a "Checking Controller Pak"
+        // dialog - so the capture was of a mid-frame state that is never displayed, and the
+        // dialog was missing from it entirely. Anything read from such a capture is a claim
+        // about a frame nobody sees.
+        //
+        // Still on the render thread's own command list, which is what the copy needs
+        // (rt64_rt_readback.h), and the colour target is in COLOR_WRITE here for the same
+        // reason it was there: it is the framebuffer that was just drawn into.
+        //
+        // Skipped when an interleaved target is being read instead, or it would overwrite that
+        // capture with the composed image.
+        bool framebufferHasRtScene = false;
+        for (const auto &pair : targetDrawCall.sceneIndices) {
+            framebufferHasRtScene = framebufferHasRtScene || pair.second;
+        }
+
+        if (framebufferHasRtScene && (getenv("PDRT64_RT_READBACK_INTERLEAVED") == nullptr)) {
+            rtReadback.record(worker, colorTarget);
+        }
+#   endif
     }
 
     void FramebufferRenderer::waitForUploaders() {
