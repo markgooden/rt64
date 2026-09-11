@@ -6,6 +6,8 @@
 #include "Constants.hlsli"
 #include "Math.hlsli"
 
+#include "shared/rt64_interleaved_raster.h"
+
 SamplerState gSampler : register(s0);
 Texture2D<float4> gFlow : register(t1);
 Texture2D<float4> gDiffuse : register(t2);
@@ -23,6 +25,15 @@ Texture2D<float4> gBackgroundColor : register(t8);
 
 float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
     float4 diffuse = gDiffuse.SampleLevel(gSampler, uv, 0);
+
+    // An interleaved raster layer resolved in front of the traced surface
+    // (RaytracingLib.hlsl's PrimaryRayGen). The raster path has already shaded it, so it is
+    // emitted as it stands - lighting it here would count that shading twice, and running it
+    // through LinearToSrgb would brighten it against the traced half of the image.
+    if (diffuse.a >= RasterLayerAlpha) {
+        return float4(diffuse.rgb, 1.0f);
+    }
+
     if (diffuse.a > EPSILON) {
         float3 directLight = gDirectLight.SampleLevel(gSampler, uv, 0).rgb;
         float3 indirectLight = gIndirectLight.SampleLevel(gSampler, uv, 0).rgb;

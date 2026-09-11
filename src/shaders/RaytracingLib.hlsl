@@ -93,13 +93,47 @@ void PrimaryRayGen() {
     gViewDirection[pixel] = float4(ray.Direction, 0.0f);
     gShadingNormal[pixel] = float4(payload.normal, 0.0f);
 
+    const float3 hitPosition = ray.Origin + ray.Direction * payload.t;
     if (payload.instanceId >= 0) {
-        gShadingPosition[pixel] = float4(ray.Origin + ray.Direction * payload.t, 1.0f);
+        gShadingPosition[pixel] = float4(hitPosition, 1.0f);
         gDepth[pixel] = payload.t;
     }
     else {
         gShadingPosition[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
         gDepth[pixel] = RtParams.farDist;
+    }
+
+    // The interleaved raster layers, resolved against the traced surface by depth.
+    //
+    // These are raster scenes that share this scene's projection but cannot be raytraced, so
+    // they are drawn separately into colour and depth targets of their own
+    // (rt64_framebuffer_renderer.cpp:1646-1656) and their descriptor heap indices are handed
+    // over in interleavedRasters. Until now nothing sampled them. On Perfect Dark's in-level
+    // frames they carry the room - measured with PDRT64_RT_READBACK_INTERLEAVED, layer 0 holds
+    // the ceiling and walls and layer 1 the console - so the traced image was missing every
+    // one of those surfaces while they were being rendered correctly each frame.
+    //
+    // Compared in NDC depth rather than in view distance. The layers hold the depth buffer the
+    // scene's own projection produced, and projecting the traced hit through RtParams.viewProj
+    // puts both in that space - no linearisation, and no need to know which projection
+    // convention the game used. A pixel no layer covers keeps the cleared far value and loses
+    // the comparison, which is what makes an uncovered pixel fall through to the trace.
+    float nearestLayerZ = 1.0f;
+    if (payload.instanceId >= 0) {
+        const float4 clipPosition = mul(RtParams.viewProj, float4(hitPosition, 1.0f));
+        nearestLayerZ = (clipPosition.w > 0.0f) ? (clipPosition.z / clipPosition.w) : 1.0f;
+    }
+
+    float3 layerColor = float3(0.0f, 0.0f, 0.0f);
+    bool layerInFront = false;
+    for (uint i = 0; i < RtParams.interleavedRastersCount; i++) {
+        const InterleavedRaster raster = interleavedRasters[i];
+        const float layerZ = gTextures[raster.depthTextureIndex][pixel].r;
+        if (layerZ < nearestLayerZ) {
+            nearestLayerZ = layerZ;
+            layerColor = gTextures[raster.colorTextureIndex][pixel].rgb;
+            layerInFront = true;
+        }
     }
 
     // Cleared rather than left stale: compose reads all of these unconditionally
@@ -110,7 +144,17 @@ void PrimaryRayGen() {
     // The surface without its baked lighting. The compose pass multiplies this by the light
     // buffers (ComposePS.hlsl:28), so anything left in here that is really light would be
     // counted twice the moment there is any.
-    gDiffuse[pixel] = float4(payload.albedo, (payload.instanceId >= 0) ? 1.0f : 0.0f);
+    //
+    // An interleaved layer in front of the traced surface goes in here instead, tagged with
+    // RasterLayerAlpha so compose emits it rather than lighting it: the raster path has
+    // already shaded that pixel, and running it through the light buffers would count the
+    // shading twice - the same double count the albedo/ambient split exists to avoid.
+    if (layerInFront) {
+        gDiffuse[pixel] = float4(layerColor, RasterLayerAlpha);
+    }
+    else {
+        gDiffuse[pixel] = float4(payload.albedo, (payload.instanceId >= 0) ? 1.0f : 0.0f);
+    }
 
     // The baked lighting, seeded into the direct light buffer for DirectRayGen to add to.
     // With no lights in range this reconstructs exactly what the game draws - albedo times
