@@ -160,7 +160,19 @@ namespace RT64 {
     }
 
     hlslpp::float3 viewDirectionFrom(hlslpp::float4x4 viewI) {
-        return hlslpp::normalize(viewI[2].xyz);
+        // Negated: the camera looks down its own -Z. viewI's third row is the camera's +Z
+        // axis in world space, which points backwards out of the screen, so returning it
+        // aimed every primary ray away from the scene and the tracer hit nothing at all.
+        //
+        // Measured rather than reasoned: with the camera ignored and a full sphere of rays
+        // swept from its origin, the level renders - a figure, wall panels and a ground plane,
+        // each instance its own colour - in the direction (0.06, -0.45, -0.89), while
+        // viewDirectionFrom was returning (0, 0, 1). The structure, the instance masks and the
+        // matrices were all correct; only the sign of the forward axis was not.
+        //
+        // The only caller is the RT camera setup (:875), so this does not reach the raster
+        // path.
+        return hlslpp::normalize(-viewI[2].xyz);
     }
 
     RenderColor toRenderColor(hlslpp::float4 v) {
