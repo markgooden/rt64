@@ -132,6 +132,48 @@ namespace RT64 {
     }
 
     void RSP::matrixCommon(const hlslpp::float4x4 &floatMatrix, uint32_t address, uint8_t params) {
+        // PDRT64_RT_DUMPMTX: every matrix as it enters the stacks, and the flags that decide
+        // which stack it enters.
+        //
+        // The combined view-projection RT64 hands the raytracer is a linear ramp - every
+        // column stepping by a constant (docs/TASKLOG.md, 2026-09-11). Three things could
+        // produce that and this separates them: if floatMatrix is already a ramp when it
+        // arrives, the fault is upstream in the port's G_MTX marshalling; if the matrices
+        // arrive sane and the projection path only ever multiplies, the ramp is accumulation
+        // here (:154, which has no reset); and the tally says which without a second run.
+        if (getenv("PDRT64_RT_DUMPMTX") != nullptr) {
+            static uint32_t mtxCalls = 0;
+            static uint32_t projLoads = 0, projMuls = 0, modelLoads = 0, modelMuls = 0;
+
+            const bool isProj = (params & projMask) != 0;
+            const bool isLoad = (params & loadMask) != 0;
+            if (isProj) {
+                isLoad ? projLoads++ : projMuls++;
+            }
+            else {
+                isLoad ? modelLoads++ : modelMuls++;
+            }
+
+            // The first few in full. A ramp is visible in one matrix; the tally needs the run.
+            if (mtxCalls < 6) {
+                fprintf(stderr, "rt64: mtx %u params 0x%02X %s %s addr %08x\n",
+                    mtxCalls, params, isProj ? "PROJ " : "MODEL",
+                    isLoad ? "LOAD" : "MUL ", address);
+                for (int r = 0; r < 4; r++) {
+                    fprintf(stderr, "rt64:     row %d: %.6f %.6f %.6f %.6f\n", r,
+                        floatMatrix[r][0], floatMatrix[r][1], floatMatrix[r][2], floatMatrix[r][3]);
+                }
+            }
+
+            mtxCalls++;
+            if ((mtxCalls % 2000) == 0) {
+                fprintf(stderr, "rt64: mtx tally after %u: proj load %u mul %u, model load %u mul %u\n",
+                    mtxCalls, projLoads, projMuls, modelLoads, modelMuls);
+            }
+
+            fflush(stderr);
+        }
+
         // Projection matrix.
         hlslpp::float4x4 &viewMatrix = viewMatrixStack[projectionMatrixStackSize - 1];
         hlslpp::float4x4 &projMatrix = projMatrixStack[projectionMatrixStackSize - 1];
@@ -190,6 +232,29 @@ namespace RT64 {
     void RSP::matrix(uint32_t address, uint8_t params) {
         const uint32_t rdramAddress = fromSegmentedMasked(address);
         const FixedMatrix *fixedMatrix = reinterpret_cast<FixedMatrix *>(state->fromRDRAM(rdramAddress));
+
+        // PDRT64_RT_DUMPMTX: the 64 raw bytes before any conversion. toMatrix4x4 recombines
+        // sixteen s16 integer halves with sixteen u16 fractional halves, so a matrix that
+        // arrives as a ramp is either real data read with the wrong layout or not matrix data
+        // at all - and only the bytes distinguish those.
+        if (getenv("PDRT64_RT_DUMPMTX") != nullptr) {
+            static uint32_t rawDumps = 0;
+            if (rawDumps++ < 2) {
+                const uint8_t *bytes = reinterpret_cast<const uint8_t *>(fixedMatrix);
+                fprintf(stderr, "rt64: mtx raw at %08x (rdram %08x):\n", address, rdramAddress);
+                for (int r = 0; r < 4; r++) {
+                    fprintf(stderr, "rt64:    ");
+                    for (int c = 0; c < 16; c++) {
+                        fprintf(stderr, " %02X", bytes[r * 16 + c]);
+                    }
+
+                    fprintf(stderr, "\n");
+                }
+
+                fflush(stderr);
+            }
+        }
+
         const hlslpp::float4x4 floatMatrix = fixedMatrix->toMatrix4x4();
         matrixCommon(floatMatrix, address, params);
     }
