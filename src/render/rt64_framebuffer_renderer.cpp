@@ -1380,16 +1380,40 @@ namespace RT64 {
         if (getenv("PDRT64_RT_DUMPTARGET") != nullptr) {
             static uint32_t composeLogs = 0;
             if (composeLogs++ < 64) {
-                fprintf(stderr, "rt64: RT composite -> colorTarget %p addr %08x %ux%u hdr %d\n",
+                // The viewport matters as much as the target: the post process pass draws the
+                // traced output with rtScene.viewport (:1389-1391), not over the whole target,
+                // so anything outside it keeps whatever the raster path put there.
+                fprintf(stderr, "rt64: RT composite -> colorTarget %p addr %08x %ux%u hdr %d  viewport %.0f,%.0f %.0fx%.0f  scissor %d,%d %dx%d\n",
                     (const void *)colorTarget, colorTarget->addressForName, colorTarget->width, colorTarget->height,
-                    colorTarget->usesHDR ? 1 : 0);
+                    colorTarget->usesHDR ? 1 : 0,
+                    rtScene.viewport.x, rtScene.viewport.y, rtScene.viewport.width, rtScene.viewport.height,
+                    rtScene.scissor.left, rtScene.scissor.top,
+                    rtScene.scissor.right - rtScene.scissor.left, rtScene.scissor.bottom - rtScene.scissor.top);
                 fflush(stderr);
             }
         }
 
-        // Set the final render target. Apply the same scissor and viewport that was determined for the raytracing step.
+        // Set the final render target.
+        //
+        // The scissor is the raytracing step's, which is the region of the target this view
+        // occupies. The viewport is NOT: post process draws a full screen triangle whose
+        // vertices are already in clip space, so the viewport has to be the rectangle that
+        // triangle should land on, and rtScene.viewport is the scene's drawing viewport.
+        //
+        // Measured on level.0000 that viewport is -38361,-37206 53205x51663 against a 960x660
+        // target - about 55x - so the triangle's clip space mapped far outside the target and
+        // the scissor kept a handful of magnified texels. The traced image came back as smooth
+        // coloured blobs, which had been read as the tracer's shading being wrong rather than
+        // as the image being blown up. Raster is unaffected by the same viewport because its
+        // geometry is transformed by the projection, which matches; a clip space triangle has
+        // no projection to match it.
+        const RenderViewport postProcessViewport(
+            float(rtScene.scissor.left), float(rtScene.scissor.top),
+            float(rtScene.scissor.right - rtScene.scissor.left),
+            float(rtScene.scissor.bottom - rtScene.scissor.top));
+
         worker->commandList->setFramebuffer(colorTarget->textureFramebuffer.get());
-        worker->commandList->setViewports(rtScene.viewport);
+        worker->commandList->setViewports(postProcessViewport);
         worker->commandList->setScissors(rtScene.scissor);
         worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
 
