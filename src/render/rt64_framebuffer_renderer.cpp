@@ -888,8 +888,41 @@ namespace RT64 {
         hlslpp::float3 cameraW = hlslpp::normalize(Target - Pos) * FocalDistance;
         hlslpp::float3 cameraU = hlslpp::normalize(hlslpp::cross(cameraW, Up));
         hlslpp::float3 cameraV = hlslpp::normalize(hlslpp::cross(cameraU, cameraW));
-        const float ulen = FocalDistance * std::tan(rtParams.fovRadians * 0.5f);// * rtParams.aspectRatio;
-        const float vlen = FocalDistance * std::tan(rtParams.fovRadians * 0.5f);
+        // The vertical half-extent from the field of view, which fovFromProj reads off the
+        // projection's y scale - and the horizontal from its x scale, which is a different
+        // number and was being ignored.
+        //
+        // ulen was the vertical extent with an aspect multiply commented out beside it, so the
+        // horizontal field equalled the vertical one and the traced image was far narrower
+        // than the game's. The ratio wanted is the projection's own: m[1][1] / m[0][0] is
+        // 1.6296 on level.0000, and that is exactly the displayed aspect of the region this
+        // view occupies - the 960x540 scissor band at the N64's non-square pixels,
+        // (960/540) * (4/3)/(320/220) = 1.6296 - and it matches the OpenGL reference's own
+        // letterboxed content band, measured at 1.6244.
+        //
+        // Taken as a ratio against vlen rather than as a second fovFromProj call so that the
+        // clamp and the NaN fallback above still govern both extents, and so a projection with
+        // no usable x scale falls back to the square field this replaces rather than to a
+        // division by zero.
+        const float projScaleX = std::abs(float(proj[0][0]));
+        const float projScaleY = std::abs(float(proj[1][1]));
+        float projAspectRatio = 1.0f;
+        if (std::isfinite(projScaleX) && std::isfinite(projScaleY) && (projScaleX > 1e-6f)) {
+            projAspectRatio = projScaleY / projScaleX;
+        }
+
+        // PDRT64_RT_FOVSCALE: scales both extents, which zooms the traced field of view
+        // without touching anything else. A sweep of it scored against the OpenGL reference
+        // says what the field should be, where reasoning about the viewport and scissor
+        // semantics produced two contradictory answers.
+        static const float fovScale = []() {
+            const char *env = getenv("PDRT64_RT_FOVSCALE");
+            const float parsed = (env != nullptr) ? float(atof(env)) : 1.0f;
+            return (parsed > 0.0f) ? parsed : 1.0f;
+        }();
+
+        const float vlen = FocalDistance * std::tan(rtParams.fovRadians * 0.5f) * fovScale;
+        const float ulen = vlen * projAspectRatio;
         cameraU = cameraU * ulen;
         cameraV = cameraV * vlen;
         rtParams.cameraU = hlslpp::float4(cameraU, 0.0f);
