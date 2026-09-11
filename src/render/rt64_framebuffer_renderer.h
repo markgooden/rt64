@@ -16,6 +16,10 @@
 #include "shared/rt64_render_indices.h"
 #include "shared/rt64_render_params.h"
 
+#if RT_ENABLED
+#include "rt64_rt_readback.h"
+#endif
+
 #include "rt64_buffer_uploader.h"
 #include "rt64_descriptor_sets.h"
 #include "rt64_framebuffer_renderer_call.h"
@@ -93,6 +97,10 @@ namespace RT64 {
         // The render target the tracer last composited into. The traced image never
         // reaches RDRAM, so a debug readback needs this handle (rt64_rt_readback.h).
         RenderTarget *rtComposeTarget = nullptr;
+
+        // The CPU side copy of that target, recorded on the render thread's own command list
+        // in the frame that drew it. Off unless PDRT64_RT_READBACK is set.
+        RtReadback rtReadback;
 #   endif
         std::unique_ptr<FramebufferRendererDescriptorTextureSet> descTextureSet;
         std::unique_ptr<RenderTexture> dummyColorTarget;

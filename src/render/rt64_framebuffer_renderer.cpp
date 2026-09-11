@@ -1412,6 +1412,15 @@ namespace RT64 {
             worker->commandList->drawInstanced(3, 1, 0, 0);
         }
 
+        // The debug view, when one is on, is part of what the tracer put on screen, so the
+        // readback is recorded after it rather than before - a PDRT64_RT_VIZ run should read
+        // back the view it is displaying.
+        //
+        // On this thread and this command list deliberately. Doing the copy from the calling
+        // thread on a worker of its own faulted inside the copy, because the render thread
+        // owns this target and resizes it between frames (rt64_rt_readback.h).
+        rtReadback.record(worker, colorTarget);
+
         // Mark targets for resolve.
         colorTarget->markForResolve();
     }
