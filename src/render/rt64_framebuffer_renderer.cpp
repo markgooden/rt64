@@ -2310,6 +2310,102 @@ namespace RT64 {
                 chosenFramebuffer->transitionRenderTargetSet.emplace(depthTarget);
             }
 
+            // PDRT64_RT_DUMPCOVER: where a frame's draw calls end up, split four ways.
+            //
+            // The composed image is far darker than the reference and the standing guess was
+            // that the interleaved rasters are built but never arrive. Half of that is now
+            // settled by reading the shaders rather than by running anything: no RT entry
+            // point references interleavedRasters, gBackgroundColor or an interleaved colour
+            // texture at all (shaders/RaytracingLib.hlsl, shaders/ComposePS.hlsl), so they
+            // cannot arrive. What is not settled is whether they are where the missing image
+            // is, and that is what this counts.
+            //
+            // Four buckets, and every draw call in the chosen framebuffer is in exactly one:
+            //
+            //   traced      instances in the chosen RT scene - these reach the image.
+            //   interleaved instances in raster scenes pulled into the RT scene (:2105).
+            //               Rendered to their own targets, resolved, transitioned to
+            //               SHADER_READ, given heap indices here - and read by nothing.
+            //   clobbered   instances in raster scenes that come before the RT scene in
+            //               sceneIndices. They draw into fbStorage->colorTarget, and then the
+            //               post process pass draws the traced output over the whole of that
+            //               same target (:1393-1399), so they are lost within the frame.
+            //   afterRt     raster scenes after the RT scene. These draw on top of the traced
+            //               output and survive, so they are not part of the loss.
+            //
+            // The bucket with the draw calls in it is the one worth wiring up. Guessing
+            // between them is exactly the move that has been wrong five times on this
+            // project, and this costs one run rather than a build and a run each.
+            if (getenv("PDRT64_RT_DUMPCOVER") != nullptr) {
+                static uint32_t coverLogs = 0;
+                if ((coverLogs++ % 120) == 0) {
+                    const RenderTargetDrawCall &chosenCall = chosenFramebuffer->renderTargetDrawCall;
+                    size_t tracedInstances = chosenRtScene->instanceIndices.size();
+                    size_t interleavedInstances = 0;
+                    size_t clobberedInstances = 0;
+                    uint32_t unheapedTargets = 0;
+                    for (uint32_t i = 0; i < interleavedRastersCount; i++) {
+                        const auto &intRaster = chosenRtScene->interleavedRasters[i];
+                        if (intRaster.rasterSceneIndex < chosenCall.rasterScenes.size()) {
+                            interleavedInstances += chosenCall.rasterScenes[intRaster.rasterSceneIndex].instanceIndices.size();
+                        }
+
+                        // A zero heap index would mean the target never made it into the
+                        // descriptor heap, which would make the contents moot regardless.
+                        if ((intRaster.colorTextureIndex == 0) || (intRaster.depthTextureIndex == 0)) {
+                            unheapedTargets++;
+                        }
+                    }
+
+                    // Order decides which of these are actually lost. recordFramebuffer walks
+                    // sceneIndices in order (:1518), so a raster scene before the RT scene
+                    // draws into the colour target and is then painted over by the post
+                    // process pass, while one after it draws on top of the traced output and
+                    // survives. Counting both as clobbered would overstate the loss.
+                    bool seenRtScene = false;
+                    size_t afterRtInstances = 0;
+                    for (const auto &pair : chosenCall.sceneIndices) {
+                        if (pair.second) {
+                            seenRtScene = true;
+                            continue;
+                        }
+
+                        if (pair.first >= chosenCall.rasterScenes.size()) {
+                            continue;
+                        }
+
+                        const size_t sceneInstances = chosenCall.rasterScenes[pair.first].instanceIndices.size();
+                        if (seenRtScene) {
+                            afterRtInstances += sceneInstances;
+                        }
+                        else {
+                            clobberedInstances += sceneInstances;
+                        }
+                    }
+
+                    // Scenes in the other framebuffer pairs of this frame. They draw into
+                    // their own targets and are not overwritten by this pass, so they are
+                    // reported apart from the three buckets rather than inside them.
+                    size_t otherFramebufferInstances = 0;
+                    for (uint32_t i = 0; i < framebufferCount; i++) {
+                        const RenderTargetDrawCall &otherCall = framebufferVector[i].renderTargetDrawCall;
+                        if (&otherCall == &chosenCall) {
+                            continue;
+                        }
+
+                        for (const RasterScene &rasterScene : otherCall.rasterScenes) {
+                            otherFramebufferInstances += rasterScene.instanceIndices.size();
+                        }
+                    }
+
+                    const size_t chosenTotal = tracedInstances + interleavedInstances + clobberedInstances + afterRtInstances;
+                    fprintf(stderr, "rt64: cover: chosen fb %zu calls = traced %zu + interleaved %zu (%u targets, %u unheaped) + clobbered %zu + afterRt %zu; other fbs %zu\n",
+                        chosenTotal, tracedInstances, interleavedInstances, interleavedRastersCount,
+                        unheapedTargets, clobberedInstances, afterRtInstances, otherFramebufferInstances);
+                    fflush(stderr);
+                }
+            }
+
             // Must have at least one element in the vector.
             if (chosenRtScene->interleavedRasters.empty()) {
                 chosenRtScene->interleavedRasters.emplace_back();
