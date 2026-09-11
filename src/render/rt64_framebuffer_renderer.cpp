@@ -2118,6 +2118,32 @@ namespace RT64 {
                         // mesh non-opaque would pay that on all of the geometry to serve the
                         // small part of it that cuts out. It also lets the traversal take the
                         // opaque path for everything else.
+                        // PDRT64_RT_DUMPBLEND: how many traced draw calls are blended rather
+                        // than opaque.
+                        //
+                        // The error against the raster render concentrates on two large flat
+                        // quads that the tracer draws solid and the raster path does not show
+                        // as solid at all (PDRT64_RT_VIZ=5). Transparency is a stub here -
+                        // gTransparent is cleared and never written - so a blended surface is
+                        // traced as fully opaque, which would look exactly like that. This
+                        // counts them instead of assuming it.
+                        if (getenv("PDRT64_RT_DUMPBLEND") != nullptr) {
+                            static uint32_t tracedCalls = 0, forceBlendCalls = 0;
+                            static uint32_t cvgXAlphaCalls = 0, alphaCvgSelCalls = 0, alphaTestCalls = 0;
+                            tracedCalls++;
+                            if (otherMode.forceBlend()) forceBlendCalls++;
+                            if (otherMode.cvgXAlpha()) cvgXAlphaCalls++;
+                            if (otherMode.alphaCvgSel()) alphaCvgSelCalls++;
+                            if (otherMode.alphaCompare() != G_AC_NONE) alphaTestCalls++;
+
+                            static uint32_t blendLogs = 0;
+                            if ((tracedCalls % 129) == 0 && (blendLogs++ < 4)) {
+                                fprintf(stderr, "rt64: traced %u calls: forceBlend %u, cvgXAlpha %u, alphaCvgSel %u, alphaCompare %u\n",
+                                    tracedCalls, forceBlendCalls, cvgXAlphaCalls, alphaCvgSelCalls, alphaTestCalls);
+                                fflush(stderr);
+                            }
+                        }
+
                         const bool alphaTested = (otherMode.alphaCompare() != G_AC_NONE);
                         const RenderBottomLevelASMesh asMesh(indexRes->at(call.meshDesc.faceIndicesStart *IndexStride), worldPosRes->at(0), RenderFormat::R32_UINT, RenderFormat::R32G32B32_FLOAT, call.callDesc.triangleCount * 3, vertexCount, PosStride, !alphaTested);
                         rtResources->addBottomLevelASMesh(asMesh);
