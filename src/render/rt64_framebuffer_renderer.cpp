@@ -1379,8 +1379,10 @@ namespace RT64 {
         // PDRT64_RT_VIZ=5 leaving the hash unchanged says, without saying why.
         if (getenv("PDRT64_RT_DUMPTARGET") != nullptr) {
             static uint32_t composeLogs = 0;
-            if (composeLogs++ < 8) {
-                fprintf(stderr, "rt64: RT composite -> colorTarget %p\n", (const void *)colorTarget);
+            if (composeLogs++ < 64) {
+                fprintf(stderr, "rt64: RT composite -> colorTarget %p addr %08x %ux%u hdr %d\n",
+                    (const void *)colorTarget, colorTarget->addressForName, colorTarget->width, colorTarget->height,
+                    colorTarget->usesHDR ? 1 : 0);
                 fflush(stderr);
             }
         }
@@ -2399,8 +2401,13 @@ namespace RT64 {
                     }
 
                     const size_t chosenTotal = tracedInstances + interleavedInstances + clobberedInstances + afterRtInstances;
-                    fprintf(stderr, "rt64: cover: chosen fb %zu calls = traced %zu + interleaved %zu (%u targets, %u unheaped) + clobbered %zu + afterRt %zu; other fbs %zu\n",
-                        chosenTotal, tracedInstances, interleavedInstances, interleavedRastersCount,
+
+                    // Which framebuffer in the vector was chosen. The writeback log in
+                    // fullSync names the same object by its own index, and without this the
+                    // two logs cannot be lined up at all.
+                    const size_t chosenIndex = size_t(chosenFramebuffer - framebufferVector.data());
+                    fprintf(stderr, "rt64: cover: chosen fb #%zu of %u, %zu calls = traced %zu + interleaved %zu (%u targets, %u unheaped) + clobbered %zu + afterRt %zu; other fbs %zu\n",
+                        chosenIndex, framebufferCount, chosenTotal, tracedInstances, interleavedInstances, interleavedRastersCount,
                         unheapedTargets, clobberedInstances, afterRtInstances, otherFramebufferInstances);
                     fflush(stderr);
                 }

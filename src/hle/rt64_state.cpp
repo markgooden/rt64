@@ -1457,10 +1457,20 @@ namespace RT64 {
                         // PDRT64_RT_DUMPTARGET: which targets actually reach RDRAM.
 #                   if RT_ENABLED
                         if (getenv("PDRT64_RT_DUMPTARGET") != nullptr) {
+                            // Printed with the target's own RDRAM address so this can be
+                            // compared against the renderer's composite log directly.
+                            // Correlating the two by framebuffer index does not work: the
+                            // renderer's framebufferIndex only advances for pairs that
+                            // record, and the two logs are emitted from different loops over
+                            // the pairs, so their relative order says nothing.
+                            //
+                            // The cap was 8 for the whole run, which truncated mid-frame and
+                            // made the writeback set look smaller than it is.
                             static uint32_t writebackLogs = 0;
-                            if (writebackLogs++ < 8) {
-                                fprintf(stderr, "rt64: writeback  <- colorTarget %p  fb %08x rows %u..%u\n",
-                                    (const void *)colorTarget, colorFb->addressStart, colorRowStart, colorRowEnd);
+                            if (writebackLogs++ < 64) {
+                                fprintf(stderr, "rt64: writeback  <- colorTarget %p addr %08x %ux%u hdr %d  fb %08x rows %u..%u\n",
+                                    (const void *)colorTarget, colorTarget->addressForName, colorTarget->width, colorTarget->height,
+                                    colorTarget->usesHDR ? 1 : 0, colorFb->addressStart, colorRowStart, colorRowEnd);
                                 fflush(stderr);
                             }
                         }
