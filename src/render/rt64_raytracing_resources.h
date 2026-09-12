@@ -47,6 +47,9 @@ namespace RT64 {
         // reprojection. A scene only accepts draw calls whose matrices match its own within
         // a threshold (:1467-1471).
         hlslpp::float4x4 curViewMatrix;
+        // The combined matrix the halves above were split out of, kept so a projection can
+        // be compared against this scene on the quantity the raster path actually uses.
+        hlslpp::float4x4 curViewProjMatrix;
         hlslpp::float4x4 curProjMatrix;
         hlslpp::float4x4 prevViewMatrix;
         hlslpp::float4x4 prevProjMatrix;
@@ -262,7 +265,7 @@ namespace RT64 {
         void addBottomLevelASMesh(const RenderBottomLevelASMesh &mesh);
         void updateBottomLevelASResources(RenderWorker *worker);
         void submitBottomLevelASCreation(RenderWorker *worker);
-        void updateTopLevelASResources(RenderWorker *worker, const std::vector<InstanceDrawCall> &instanceDrawCalls, const std::vector<uint32_t> &instanceIndices);
+        void updateTopLevelASResources(RenderWorker *worker, const std::vector<InstanceDrawCall> &instanceDrawCalls, const std::vector<RenderAffineTransform> &instanceTransforms, const std::vector<uint32_t> &instanceIndices);
         void submitTopLevelASCreation(RenderWorker *worker);
 
         // Shader binding table, rebuilt whenever the hit groups or descriptor sets change.

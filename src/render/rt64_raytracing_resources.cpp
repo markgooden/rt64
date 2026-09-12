@@ -422,7 +422,7 @@ namespace RT64 {
 
     // Top level acceleration structure.
 
-    void RaytracingResources::updateTopLevelASResources(RenderWorker *worker, const std::vector<InstanceDrawCall> &instanceDrawCalls, const std::vector<uint32_t> &instanceIndices) {
+    void RaytracingResources::updateTopLevelASResources(RenderWorker *worker, const std::vector<InstanceDrawCall> &instanceDrawCalls, const std::vector<RenderAffineTransform> &instanceTransforms, const std::vector<uint32_t> &instanceIndices) {
         assert(worker != nullptr);
 
         // Map each instance to its structure by counting, not by position.
@@ -492,9 +492,14 @@ namespace RT64 {
             instance.instanceContributionToHitGroupIndex = drawCall.raytracing.hitGroupIndex;
             instance.cullDisable = drawCall.raytracing.cullDisable;
 
-            // The transform is left as the default identity. The vertices these structures
-            // are built from were already written in world space by the RSP world compute
-            // pass, which is the reason for building from that buffer in the first place.
+            // The affine that puts this call's geometry into the scene's space, which is
+            // identity for every call whose projection shares the scene's view matrix.
+            // The vertices these structures are built from were written in world space by
+            // the RSP world compute pass, and for a projection with its own view matrix
+            // that world is the projection's own - the room's, in Perfect Dark, which is
+            // why those projections are a different space and were being refused entry
+            // to the scene rather than placed in it.
+            instance.transform = (drawCallIndex < instanceTransforms.size()) ? instanceTransforms[drawCallIndex] : RenderAffineTransform();
             topLevelASInstances.emplace_back(instance);
         }
 
@@ -852,7 +857,14 @@ namespace RT64 {
 
         for (uint32_t i = 0; i < targetCount; i++) {
             RenderTarget *colorTarget = interleavedColorTargetVector[i].get();
-            RenderTarget *depthTarget = interleavedDepthTargetVector[i].get();
+            // One depth target for every layer, not one each. The layers are interleaved
+            // between RT scenes but among themselves they are ordinary draws sharing the
+            // game's single depth buffer, and a per-layer depth buffer cleared per layer
+            // throws that away: nothing then orders one layer against another, and the
+            // composite cannot tell a layer in front from one behind. Measured
+            // 2026-09-12 as black drawn over the console, which is layer 0's opening
+            // winning on depth against a layer 1 that holds the console itself.
+            RenderTarget *depthTarget = interleavedDepthTargetVector[0].get();
 
             // KNOWN DEFECT, not yet fixed. setupColor and setupDepth release the existing
             // texture and allocate a new one every time they are called
@@ -870,8 +882,10 @@ namespace RT64 {
             // dependency needs to be understood before it is removed.
             colorTarget->setupColor(worker, uint32_t(width), uint32_t(height));
             colorTarget->setupColorFramebuffer(worker);
-            depthTarget->setupDepth(worker, uint32_t(width), uint32_t(height));
-            depthTarget->setupDepthFramebuffer(worker);
+            if (i == 0) {
+                depthTarget->setupDepth(worker, uint32_t(width), uint32_t(height));
+                depthTarget->setupDepthFramebuffer(worker);
+            }
 
             RenderFramebufferKey framebufferKey;
             framebufferKey.modifierKey = i;

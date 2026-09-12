@@ -42,7 +42,15 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         float3 transparent = gTransparent.SampleLevel(gSampler, uv, 0).rgb;
 
         // We intentionally mix the HDR buffer that will be upscaled in sRGB space to preserve the color of effects like fog and such.
-        float3 result = lerp(LinearToSrgb(diffuse.rgb), LinearToSrgb(diffuse.rgb * (directLight + indirectLight)), diffuse.a);
+        // No LinearToSrgb. Measured 2026-09-12 against the OpenGL reference over 25612
+        // pixels: the traced image fits `reference encoded to sRGB` with an rms of 18.4/255
+        // where the identity fits at 81.9, and the best pure gamma is 0.38 - which is the
+        // sRGB encode exponent. The albedo this shader receives is the colour combiner's
+        // output built from N64 texels and vertex colours, and those are display space
+        // values already; encoding them again is the washed-out look the whole frame has
+        // had. gBackgroundColor two branches down was already exempted for the same
+        // reason, on the same reasoning, for the raster half of the image.
+        float3 result = lerp(diffuse.rgb, diffuse.rgb * (directLight + indirectLight), diffuse.a);
         result += reflection;
         result += refraction;
         result += transparent;

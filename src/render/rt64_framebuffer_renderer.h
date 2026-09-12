@@ -71,6 +71,13 @@ namespace RT64 {
         uint32_t textureCacheGlobalVersion = 0;
         bool textureCacheReplacementMapEnabled = false;
         std::vector<InstanceDrawCall> instanceDrawCallVector;
+
+        // One entry per draw call, parallel to the vector above: the affine that puts
+        // that call's geometry into the RT scene's space. Identity for every call whose
+        // projection shares the scene's view matrix, which is all of them unless
+        // PDRT64_RT_JOINVIEWS is on. It lives beside the calls rather than inside them
+        // because InstanceDrawCall's payload is a union and this belongs to only one arm.
+        std::vector<RenderAffineTransform> instanceTransformVector;
         std::vector<RenderPipelineProgram> hitGroupVector;
         std::vector<interop::RenderIndices> renderIndicesVector;
         std::vector<DynamicTextureView> dynamicTextureViewVector;

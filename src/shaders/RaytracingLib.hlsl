@@ -105,37 +105,76 @@ void PrimaryRayGen() {
         gDepth[pixel] = RtParams.farDist;
     }
 
-    // The interleaved raster layers, resolved against the traced surface by depth.
+    // The interleaved raster layers, resolved against the traced surface.
     //
     // These are raster scenes that share this scene's projection but cannot be raytraced, so
     // they are drawn separately into colour and depth targets of their own
-    // (rt64_framebuffer_renderer.cpp:1646-1656) and their descriptor heap indices are handed
-    // over in interleavedRasters. Until now nothing sampled them. On Perfect Dark's in-level
-    // frames they carry the room - measured with PDRT64_RT_READBACK_INTERLEAVED, layer 0 holds
-    // the ceiling and walls and layer 1 the console - so the traced image was missing every
-    // one of those surfaces while they were being rendered correctly each frame.
+    // (rt64_framebuffer_renderer.cpp:1674-1712) and their descriptor heap indices are handed
+    // over in interleavedRasters. On Perfect Dark's in-level frames they carry the room -
+    // measured with PDRT64_RT_READBACK_INTERLEAVED, layer 0 holds the ceiling and walls and
+    // layer 1 the console.
     //
-    // Compared in NDC depth rather than in view distance. The layers hold the depth buffer the
-    // scene's own projection produced, and projecting the traced hit through RtParams.viewProj
-    // puts both in that space - no linearisation, and no need to know which projection
-    // convention the game used. A pixel no layer covers keeps the cleared far value and loses
-    // the comparison, which is what makes an uncovered pixel fall through to the trace.
-    float nearestLayerZ = 1.0f;
+    // They share one depth buffer with each other, cleared once before the first of them,
+    // so the GPU has already ordered them against one another by the time this runs. What
+    // is left here is a single comparison: that shared depth against the traced hit's.
+    //
+    // The traced surface's own depth, in the same 0..1 the layers' buffer holds.
+    float tracedLayerZ = 1.0f;
     if (payload.instanceId >= 0) {
-        const float4 clipPosition = mul(RtParams.viewProj, float4(hitPosition, 1.0f));
-        nearestLayerZ = (clipPosition.w > 0.0f) ? (clipPosition.z / clipPosition.w) : 1.0f;
+        // From the ray distance and this projection's own near and far, not through
+        // viewProj. The matrix path was measured on 2026-09-12 reading >= 1.0 on 77% of
+        // hits, which loses every depth comparison it is asked to make, and payload.t is
+        // the one quantity here with no transform in it. The view depth is the distance
+        // along the ray projected onto the view axis, and z01 is what a rasteriser would
+        // have written for it: f * (z - n) / (z * (f - n)).
+        const float3 viewAxis = normalize(-RtParams.viewI[2].xyz);
+        const float viewDepth = max(payload.t * dot(ray.Direction, viewAxis), RtParams.nearDist);
+        tracedLayerZ = saturate(RtParams.farDist * (viewDepth - RtParams.nearDist) / (viewDepth * (RtParams.farDist - RtParams.nearDist)));
     }
 
+    // One depth test for the whole set of layers.
+    //
+    // The layers now share a depth buffer, cleared once before the first of them
+    // (rt64_framebuffer_renderer.cpp, rt64_raytracing_resources.cpp), so a later layer's
+    // draws were depth tested against the earlier ones exactly as the game's own single
+    // depth buffer would have tested them. That does the layer-against-layer ordering on the
+    // GPU where it belongs, and leaves this with one comparison to make: the nearest layer
+    // surface against the traced one.
+    //
+    // Coverage is the colour, since a layer that lost the depth test wrote nothing into its
+    // own colour target. A surface the game draws as pure black is indistinguishable from
+    // one it never drew, which is the one thing this rule cannot see.
     float3 layerColor = float3(0.0f, 0.0f, 0.0f);
-    bool layerInFront = false;
+    bool layerCovered = false;
     for (uint i = 0; i < RtParams.interleavedRastersCount; i++) {
         const InterleavedRaster raster = interleavedRasters[i];
-        const float layerZ = gTextures[raster.depthTextureIndex][pixel].r;
-        if (layerZ < nearestLayerZ) {
-            nearestLayerZ = layerZ;
-            layerColor = gTextures[raster.colorTextureIndex][pixel].rgb;
-            layerInFront = true;
+
+        // The layers are not the size the trace runs at - measured 2026-09-12, the targets
+        // are the scene's own 960x660 against a 640x440 dispatch, because createOutputBuffers
+        // applies resolutionScale (rt64_raytracing_resources.cpp:702) and
+        // updateInterleavedRenderTargets does not. Indexing them with the ray's pixel read
+        // the top-left corner of every layer. A normalised coordinate needs neither size and
+        // survives any scale, and it is how compose reads these same buffers
+        // (shaders/ComposePS.hlsl:27).
+        const float2 layerUV = (float2(pixel) + 0.5f) * RtParams.resolution.zw;
+        const float4 rasterColor = gTextures[raster.colorTextureIndex].SampleLevel(gLinearClampClampSampler, layerUV, 0);
+        if (any(rasterColor.rgb > 0.0f)) {
+            layerColor = rasterColor.rgb;
+            layerCovered = true;
         }
+    }
+
+    bool layerInFront = false;
+    if (layerCovered) {
+        // Every layer carries the same depth index now, so layer zero's is the shared buffer.
+        // A texel load rather than a filtered sample: interpolating depth across a silhouette
+        // invents a surface that is in neither of the two it sits between.
+        const float2 layerUV = (float2(pixel) + 0.5f) * RtParams.resolution.zw;
+        uint depthWidth = 0;
+        uint depthHeight = 0;
+        gTextures[interleavedRasters[0].depthTextureIndex].GetDimensions(depthWidth, depthHeight);
+        const float layerZ = gTextures[interleavedRasters[0].depthTextureIndex][uint2(layerUV * float2(depthWidth, depthHeight))].r;
+        layerInFront = (layerZ < tracedLayerZ);
     }
 
     // Cleared rather than left stale: compose reads all of these unconditionally
