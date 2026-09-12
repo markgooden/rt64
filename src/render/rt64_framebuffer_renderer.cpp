@@ -90,6 +90,23 @@ namespace RT64 {
         }();
         return mask;
     }
+
+    // PDRT64_RT_JOINVIEWS: let a projection with a view matrix of its own join the RT scene,
+    // placed by a per-instance transform, instead of being refused for having one.
+    //
+    // Measured 2026-09-12 on level.0000: four perspective projections carrying 26 draw calls -
+    // the room, the console, everything but the character and two quads - are rejected because
+    // their view matrices differ from the scene that opened by 206.6. That is a real camera
+    // transform, not noise, and 75.8% of the frame goes untraced because of it. A TLAS instance
+    // can carry exactly that transform, which is what this turns on.
+    //
+    // Off by default while it is unproven: with it on, geometry that used to arrive correctly
+    // through the raster path arrives through the tracer instead, so a wrong transform loses
+    // the room rather than misplacing a highlight.
+    static bool rtJoinViews() {
+        static const bool enabled = (getenv("PDRT64_RT_JOINVIEWS") != nullptr);
+        return enabled;
+    }
 #endif
 
     // Helper functions.
@@ -229,6 +246,7 @@ namespace RT64 {
     
     void FramebufferRenderer::resetFramebuffers(RenderWorker *worker, bool ubershadersVisible, float ditherNoiseStrength, const RenderMultisampling &multisampling) {
         instanceDrawCallVector.clear();
+        instanceTransformVector.clear();
         hitGroupVector.clear();
         renderIndicesVector.clear();
         rspSmoothNormalVector.clear();
@@ -1025,7 +1043,7 @@ namespace RT64 {
         Framebuffer &framebuffer = framebufferVector[framebufferCount - 1];
         RenderDescriptorSet *descRealDepthSet = framebuffer.descRealFbSet->get();
         RenderDescriptorSet *descriptorSets[] = { descCommonSet->get(), descTextureSet->get(), descTextureSet->get(), descRealDepthSet };
-        rtResources->updateTopLevelASResources(worker, instanceDrawCallVector, rtScene.instanceIndices);
+        rtResources->updateTopLevelASResources(worker, instanceDrawCallVector, instanceTransformVector, rtScene.instanceIndices);
         rtResources->createShaderBindingTable(worker, rtState, descriptorSets, uint32_t(std::size(descriptorSets)), hitGroupVector);
         rtResources->updateLightsBuffer(worker, rtScene);
     }
@@ -1977,7 +1995,17 @@ namespace RT64 {
                 const float Threshold = 1e-6f;
                 const float viewMatrixDiff = matrixDifference(drawData.modViewTransforms[proj.transformsIndex], rtScene.curViewMatrix);
                 const float projMatrixDiff = matrixDifference(drawData.modProjTransforms[proj.transformsIndex], rtScene.curProjMatrix);
+                const float viewProjDiff = matrixDifference(drawData.modViewProjTransforms[proj.transformsIndex], rtScene.curViewProjMatrix);
                 rtProjCompatible = (viewMatrixDiff < Threshold) && (projMatrixDiff < Threshold);
+
+                // With the view matrix folded into each instance's transform, only the
+                // projection half has to match - the lens, not where the camera is. The
+                // tolerance is looser than 1e-6 because the halves come out of a
+                // decomposition: the room's projection differs from the scene's by
+                // 0.00021, which is the same lens by any reasonable reading.
+                if (rtJoinViews()) {
+                    rtProjCompatible = (projMatrixDiff < 1e-2f);
+                }
 
                 // How far apart, not just whether. The threshold is 1e-6, which is tight
                 // enough that floating point noise in a per-room transform would fail it,
@@ -1988,6 +2016,11 @@ namespace RT64 {
                     if (diffLogs++ < 64) {
                         fprintf(stderr, "rt64:   proj %u matrix diff: view %.9f, proj %.9f -> %s\n",
                             pr, viewMatrixDiff, projMatrixDiff, rtProjCompatible ? "compatible" : "REJECTED");
+                        // The combined matrix as well as the halves. RT64 splits viewProj into
+                        // a view and a projection and only the RT path reads the halves
+                        // (rt64_workload_queue.cpp:309), so a split that is wrong for this game
+                        // would separate projections that the raster path treats as one camera.
+                        fprintf(stderr, "rt64:     proj %u combined viewProj diff: %.9f\n", pr, viewProjDiff);
                         if (!rtProjCompatible) {
                             // The shape of the difference, not just its size. A pure
                             // translation can be folded into the instance transform of a
@@ -2424,6 +2457,26 @@ namespace RT64 {
                 }
 
                 // Determine to use the draw call either in the RT scene or the raster scene.
+                // The affine that puts this call's geometry into the RT scene's space.
+                // Identity unless the call's projection carries a view matrix of its own,
+                // which under PDRT64_RT_JOINVIEWS is how a room drawn in its own space
+                // joins the scene instead of being refused. D3D12 wants object-to-world
+                // with column vectors, and the game's matrices are row vector, so the
+                // rotation is transposed and the translation comes from row 3.
+                RenderAffineTransform instanceTransform;
+#           if RT_ENABLED
+                if (rtJoinViews() && (instanceDrawCall.type == InstanceDrawCall::Type::Raytracing) && !rtScene.instanceIndices.empty()) {
+                    const auto &pv = drawData.modViewTransforms[proj.transformsIndex];
+                    for (int r = 0; r < 3; r++) {
+                        for (int c = 0; c < 3; c++) {
+                            instanceTransform.m[r][c] = pv[c][r];
+                        }
+
+                        instanceTransform.m[r][3] = pv[3][r];
+                    }
+                }
+#           endif
+
                 const uint32_t instanceIndex = static_cast<uint32_t>(instanceDrawCallVector.size());
 #           if RT_ENABLED
                 bool rtCall = instanceDrawCall.type == InstanceDrawCall::Type::Raytracing;
@@ -2446,6 +2499,7 @@ namespace RT64 {
                         }
 
                         rtScene.curViewMatrix = drawData.modViewTransforms[proj.transformsIndex];
+                        rtScene.curViewProjMatrix = drawData.modViewProjTransforms[proj.transformsIndex];
                         rtScene.curProjMatrix = drawData.modProjTransforms[proj.transformsIndex];
                         rtScene.prevViewMatrix = drawData.prevViewTransforms[proj.transformsIndex];
                         rtScene.prevProjMatrix = drawData.prevProjTransforms[proj.transformsIndex];
@@ -2516,6 +2570,7 @@ namespace RT64 {
 
                 typeTally[uint32_t(instanceDrawCall.type) & 7]++;
                 instanceDrawCallVector.push_back(instanceDrawCall);
+                instanceTransformVector.push_back(instanceTransform);
                 globalCallIndex++;
             }
 

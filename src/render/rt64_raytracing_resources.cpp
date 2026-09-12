@@ -422,7 +422,7 @@ namespace RT64 {
 
     // Top level acceleration structure.
 
-    void RaytracingResources::updateTopLevelASResources(RenderWorker *worker, const std::vector<InstanceDrawCall> &instanceDrawCalls, const std::vector<uint32_t> &instanceIndices) {
+    void RaytracingResources::updateTopLevelASResources(RenderWorker *worker, const std::vector<InstanceDrawCall> &instanceDrawCalls, const std::vector<RenderAffineTransform> &instanceTransforms, const std::vector<uint32_t> &instanceIndices) {
         assert(worker != nullptr);
 
         // Map each instance to its structure by counting, not by position.
@@ -492,9 +492,14 @@ namespace RT64 {
             instance.instanceContributionToHitGroupIndex = drawCall.raytracing.hitGroupIndex;
             instance.cullDisable = drawCall.raytracing.cullDisable;
 
-            // The transform is left as the default identity. The vertices these structures
-            // are built from were already written in world space by the RSP world compute
-            // pass, which is the reason for building from that buffer in the first place.
+            // The affine that puts this call's geometry into the scene's space, which is
+            // identity for every call whose projection shares the scene's view matrix.
+            // The vertices these structures are built from were written in world space by
+            // the RSP world compute pass, and for a projection with its own view matrix
+            // that world is the projection's own - the room's, in Perfect Dark, which is
+            // why those projections are a different space and were being refused entry
+            // to the scene rather than placed in it.
+            instance.transform = (drawCallIndex < instanceTransforms.size()) ? instanceTransforms[drawCallIndex] : RenderAffineTransform();
             topLevelASInstances.emplace_back(instance);
         }
 
