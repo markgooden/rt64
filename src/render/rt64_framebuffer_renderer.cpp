@@ -2672,6 +2672,49 @@ namespace RT64 {
                 chosenFramebuffer->transitionRenderTargetSet.emplace(depthTarget);
             }
 
+            // PDRT64_RT_CHECKAS: the ordering keys the composite compares. firstInstanceIndex
+            // is a draw call index, and so is every entry of the RT scene's instanceIndices,
+            // so whether a layer is ordered over the traced surface is decided by these
+            // numbers and nothing else.
+            if (getenv("PDRT64_RT_CHECKAS") != nullptr) {
+                static uint32_t orderLogs = 0;
+                if ((orderLogs++ < 2) || ((orderLogs > 16) && (orderLogs < 19))) {
+                    uint32_t rtMin = UINT32_MAX;
+                    uint32_t rtMax = 0;
+                    for (uint32_t idx : chosenRtScene->instanceIndices) {
+                        rtMin = std::min(rtMin, idx);
+                        rtMax = std::max(rtMax, idx);
+                    }
+
+                    fprintf(stderr, "rt64: ORDER traced draw calls %u..%u (%zu instances)\n",
+                        rtMin, rtMax, chosenRtScene->instanceIndices.size());
+                    for (uint32_t i = 0; i < interleavedRastersCount; i++) {
+                        const auto &r = chosenRtScene->interleavedRasters[i];
+                        const auto &rs = chosenFramebuffer->renderTargetDrawCall.rasterScenes[r.rasterSceneIndex];
+                        uint32_t lo = UINT32_MAX;
+                        uint32_t hi = 0;
+                        for (uint32_t idx : rs.instanceIndices) {
+                            lo = std::min(lo, idx);
+                            hi = std::max(hi, idx);
+                        }
+
+                        fprintf(stderr, "rt64: ORDER   layer %u - scene %u, draw calls %u..%u (%zu), key %u\n",
+                            i, r.rasterSceneIndex, lo, hi, rs.instanceIndices.size(), r.firstInstanceIndex);
+                    }
+
+                    for (uint32_t i = 0; i < interleavedRastersCount; i++) {
+                        const auto &r = chosenRtScene->interleavedRasters[i];
+                        const RenderTarget *ct = rtResources->interleavedColorTargetVector[i].get();
+                        const RenderTarget *dt = rtResources->interleavedDepthTargetVector[i].get();
+                        fprintf(stderr, "rt64: ORDER   layer %u targets colour %ux%u index %u, depth %ux%u index %u; rt texture %ux%u\n",
+                            i, ct->width, ct->height, r.colorTextureIndex, dt->width, dt->height, r.depthTextureIndex,
+                            rtResources->textureWidth, rtResources->textureHeight);
+                    }
+
+                    fflush(stderr);
+                }
+            }
+
             // PDRT64_RT_DUMPCOVER: where a frame's draw calls end up, split four ways.
             //
             // The composed image is far darker than the reference and the standing guess was
