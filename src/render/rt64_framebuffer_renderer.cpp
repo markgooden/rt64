@@ -2107,7 +2107,19 @@ namespace RT64 {
                         raytracing.cullDisable = !call.shaderDesc.flags.culling;
 
                         const interop::OtherMode &otherMode = call.callDesc.otherMode;
+                        // A blended surface is not opaque, and tracing it as an opaque primary
+                        // hit draws it solid over whatever is behind it. Transparency is still
+                        // a stub, so the honest thing for now is to let primary visibility see
+                        // through it, and the mask is how: the bit replaces the depth ones so
+                        // a ray that does not ask for it skips the instance entirely.
+                        //
+                        // Measured rare - 3 of 129 traced calls on level.0000
+                        // (PDRT64_RT_DUMPBLEND) - and those three are large flat quads that
+                        // dominate the error against the raster render.
                         raytracing.queryMask = (otherMode.zCmp() || otherMode.zUpd()) ? DepthRayQueryMask : NoDepthRayQueryMask;
+                        if (otherMode.forceBlend()) {
+                            raytracing.queryMask = BlendedRayQueryMask;
+                        }
                         if (drawData.extraParams[call.callDesc.callIndex].shadowCatcherFactor > 0.0f) {
                             raytracing.queryMask |= ShadowCatcherRayQueryMask;
                         }
@@ -2118,6 +2130,42 @@ namespace RT64 {
                         // mesh non-opaque would pay that on all of the geometry to serve the
                         // small part of it that cuts out. It also lets the traversal take the
                         // opaque path for everything else.
+                        // PDRT64_RT_DUMPCALL=<a,b,...>: everything known about named draw
+                        // calls. The two large quads that dominate the error against the raster
+                        // render were identified as draw calls 140 and 141 by inverting the
+                        // InstanceId debug view's colour hash (DebugPS.hlsl:64), which is the
+                        // only handle that view gives on which call a pixel belongs to. This
+                        // says what they are.
+                        if (const char *dumpCall = getenv("PDRT64_RT_DUMPCALL")) {
+                            const uint32_t callIndex = call.callDesc.callIndex;
+                            char needle[16];
+                            snprintf(needle, sizeof(needle), "%u", callIndex);
+                            bool wanted = false;
+                            for (const char *at = strstr(dumpCall, needle); at != nullptr; at = strstr(at + 1, needle)) {
+                                const char before = (at == dumpCall) ? ',' : at[-1];
+                                const char after = at[strlen(needle)];
+                                wanted = ((before == ',') || (before == ' ')) &&
+                                         ((after == ',') || (after == ' ') || (after == 0));
+                                if (wanted) {
+                                    break;
+                                }
+                            }
+
+                            static uint32_t callLogs = 0;
+                            if (wanted && (callLogs++ < 12)) {
+                                const interop::OtherMode &om = call.callDesc.otherMode;
+                                fprintf(stderr, "rt64: call %u: tris %u, cycleType %u, zCmp %d zUpd %d, "
+                                    "alphaCompare %u, forceBlend %d alphaCvgSel %d cvgXAlpha %d clrOnCvg %d, "
+                                    "blenderInputs 0x%04X, tiles %u, rtProj %d\n",
+                                    callIndex, call.callDesc.triangleCount, om.cycleType() >> G_MDSFT_CYCLETYPE,
+                                    om.zCmp() ? 1 : 0, om.zUpd() ? 1 : 0, om.alphaCompare() >> G_MDSFT_ALPHACOMPARE,
+                                    om.forceBlend() ? 1 : 0, om.alphaCvgSel() ? 1 : 0, om.cvgXAlpha() ? 1 : 0,
+                                    om.clrOnCvg() ? 1 : 0, om.blenderInputs(), call.callDesc.tileCount,
+                                    rtProj ? 1 : 0);
+                                fflush(stderr);
+                            }
+                        }
+
                         // PDRT64_RT_DUMPBLEND: how many traced draw calls are blended rather
                         // than opaque.
                         //
@@ -2130,7 +2178,18 @@ namespace RT64 {
                         if (getenv("PDRT64_RT_DUMPBLEND") != nullptr) {
                             static uint32_t tracedCalls = 0, forceBlendCalls = 0;
                             static uint32_t cvgXAlphaCalls = 0, alphaCvgSelCalls = 0, alphaTestCalls = 0;
+                            static uint32_t multiTileCalls = 0, multiTileTris = 0, totalTris = 0;
                             tracedCalls++;
+
+                            // Tile count, because the hit shader samples tile zero only (the
+                            // standing "mip zero and tile zero" limitation). Weighted by
+                            // triangles as well as by call, since what matters is how much of
+                            // the frame is shaded from the wrong tile, not how many calls are.
+                            totalTris += call.callDesc.triangleCount;
+                            if (call.callDesc.tileCount > 1) {
+                                multiTileCalls++;
+                                multiTileTris += call.callDesc.triangleCount;
+                            }
                             if (otherMode.forceBlend()) forceBlendCalls++;
                             if (otherMode.cvgXAlpha()) cvgXAlphaCalls++;
                             if (otherMode.alphaCvgSel()) alphaCvgSelCalls++;
@@ -2138,8 +2197,10 @@ namespace RT64 {
 
                             static uint32_t blendLogs = 0;
                             if ((tracedCalls % 129) == 0 && (blendLogs++ < 4)) {
-                                fprintf(stderr, "rt64: traced %u calls: forceBlend %u, cvgXAlpha %u, alphaCvgSel %u, alphaCompare %u\n",
-                                    tracedCalls, forceBlendCalls, cvgXAlphaCalls, alphaCvgSelCalls, alphaTestCalls);
+                                fprintf(stderr, "rt64: traced %u calls: forceBlend %u, cvgXAlpha %u, alphaCvgSel %u, alphaCompare %u; multiTile %u calls / %u of %u tris (%.1f%%)\n",
+                                    tracedCalls, forceBlendCalls, cvgXAlphaCalls, alphaCvgSelCalls, alphaTestCalls,
+                                    multiTileCalls, multiTileTris, totalTris,
+                                    (totalTris > 0) ? (100.0 * double(multiTileTris) / double(totalTris)) : 0.0);
                                 fflush(stderr);
                             }
                         }

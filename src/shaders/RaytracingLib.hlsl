@@ -84,10 +84,12 @@ void PrimaryRayGen() {
     payload.t = -1.0f;
     payload.instanceId = -1;
 
-    // Both query masks are traced: a draw call is tagged with one or the other depending on
-    // whether it writes or tests depth (rt64_framebuffer_renderer.cpp:1590), and primary
-    // visibility wants everything that is in the scene at all.
-    TraceRay(SceneBVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+    // Everything except the blended surfaces. A draw call is tagged with one of the two depth
+    // masks depending on whether it writes or tests depth, and primary visibility wants all of
+    // those; a surface the game blends carries BlendedRayQueryMask (0x8) instead, and tracing
+    // it here would draw it solid over whatever is behind it because transparency is a stub.
+    // 0xF7 is 0xFF with that bit cleared (common/rt64_common.h).
+    TraceRay(SceneBVH, RAY_FLAG_NONE, 0xF7, 0, 0, 0, ray, payload);
 
     gInstanceId[pixel] = payload.instanceId;
     gViewDirection[pixel] = float4(ray.Direction, 0.0f);

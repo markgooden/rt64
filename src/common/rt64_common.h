@@ -31,6 +31,12 @@ namespace RT64 {
     static const unsigned int NoDepthRayQueryMask = 0x2;
     static const unsigned int ShadowCatcherRayQueryMask = 0x4;
 
+    // Surfaces the game blends rather than draws opaque. They carry this bit *instead of* the
+    // depth masks, not as well as them: a TraceRay sees an instance when the two masks share
+    // any bit, so the only way for a ray to skip one is for it to carry no bit that ray asks
+    // for. Primary visibility therefore traces 0xF7 (shaders/RaytracingLib.hlsl).
+    static const unsigned int BlendedRayQueryMask = 0x8;
+
     // Error string for last error or exception that was caught.
     extern std::string GlobalLastError;
 
