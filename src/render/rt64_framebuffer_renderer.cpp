@@ -1104,6 +1104,17 @@ namespace RT64 {
         Framebuffer &framebuffer = framebufferVector[framebufferCount - 1];
         RenderDescriptorSet *descRealFbSet = framebuffer.descRealFbSet->get();
 
+        // PDRT64_RT_CHECKAS: one line per traced frame. This is what turned "it crashes in
+        // the level" into "it crashes on the first frame whose scene grew to 85 instances".
+        if (getenv("PDRT64_RT_CHECKAS") != nullptr) {
+            static uint32_t rtFrame = 0;
+            rtFrame++;
+            fprintf(stderr, "rt64: RTFRAME %u - %zu instances at %ux%u\n",
+                rtFrame, rtResources->topLevelASInstances.size(),
+                rtResources->textureWidth, rtResources->textureHeight);
+            fflush(stderr);
+        }
+
         // One line, the first time rays are actually recorded, so a run that silently takes
         // the raster path is distinguishable from one that traced. RT64_LOG_PRINTF is
         // compiled out of release builds, so it cannot answer that on its own.
@@ -2224,6 +2235,41 @@ namespace RT64 {
                                 fprintf(stderr, "rt64:   usesLOD %u calls / %u of %u tris (%.1f%%)\n",
                                     usesLodCalls, usesLodTris, totalTris,
                                     (totalTris > 0) ? (100.0 * double(usesLodTris) / double(totalTris)) : 0.0);
+                                fflush(stderr);
+                            }
+                        }
+
+                        // PDRT64_RT_CHECKAS: the ranges each bottom level structure is built
+                        // over, checked against the buffers they point into. A build that reads
+                        // past the index buffer, or over world positions the vertex pass never
+                        // wrote, is a GPU page fault - which arrives as a device removal with
+                        // nothing in the debug layer to say why, because every API call was valid.
+                        if (getenv("PDRT64_RT_CHECKAS") != nullptr) {
+                            static uint32_t checkMeshes = 0;
+                            static uint32_t checkBad = 0;
+                            const uint64_t idxStart = uint64_t(call.meshDesc.faceIndicesStart) * IndexStride;
+                            const uint64_t idxEnd = idxStart + uint64_t(call.callDesc.triangleCount) * 3 * IndexStride;
+                            const uint64_t idxCap = drawBuffers.faceIndicesBuffer.allocatedSize;
+                            const uint64_t posEnd = uint64_t(vertexCount) * PosStride;
+                            const uint64_t posCap = outputBuffers.worldPosBuffer.allocatedSize;
+                            const uint64_t posComputed = outputBuffers.worldPosBuffer.computedSize;
+                            const bool bad = (idxEnd > idxCap) || (posEnd > posCap) || (posEnd > posComputed) || (call.callDesc.triangleCount == 0);
+                            checkMeshes++;
+                            if (bad && (checkBad < 32)) {
+                                checkBad++;
+                                fprintf(stderr, "rt64: CHECKAS bad mesh - tris %u, idx bytes %llu..%llu of %llu, pos bytes %llu of %llu allocated / %llu computed\n",
+                                    call.callDesc.triangleCount, (unsigned long long)idxStart, (unsigned long long)idxEnd,
+                                    (unsigned long long)idxCap, (unsigned long long)posEnd, (unsigned long long)posCap,
+                                    (unsigned long long)posComputed);
+                                fflush(stderr);
+                            }
+
+                            // A periodic line regardless, so a clean run is distinguishable from
+                            // a check that never ran.
+                            if ((checkMeshes % 256) == 0) {
+                                fprintf(stderr, "rt64: CHECKAS %u meshes checked, %u bad; vertexCount %u, pos %llu allocated / %llu computed, idx %llu allocated\n",
+                                    checkMeshes, checkBad, vertexCount, (unsigned long long)posCap,
+                                    (unsigned long long)posComputed, (unsigned long long)idxCap);
                                 fflush(stderr);
                             }
                         }

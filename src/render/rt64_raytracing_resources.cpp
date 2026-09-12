@@ -260,9 +260,15 @@ namespace RT64 {
     // Recreates a buffer only when what exists is too small, and reports whether it had to.
     // allocatedSize records what was allocated rather than what was asked for, so growth
     // headroom is not forgotten between frames.
-    static bool ensureBuffer(RenderDevice *device, std::unique_ptr<RenderBuffer> &buffer, uint64_t &allocatedSize, uint64_t requiredSize, const RenderBufferDesc &desc) {
+    static bool ensureBuffer(RenderDevice *device, std::unique_ptr<RenderBuffer> &buffer, uint64_t &allocatedSize, uint64_t requiredSize, const RenderBufferDesc &desc, std::vector<std::unique_ptr<RenderBuffer>> &retired) {
         if ((buffer != nullptr) && (allocatedSize >= requiredSize)) {
             return false;
+        }
+
+        // The buffer being replaced may still be referenced by a frame in flight, so it is
+        // retired rather than released here. See retiredBuffers in the header.
+        if (buffer != nullptr) {
+            retired.emplace_back(std::move(buffer));
         }
 
         allocatedSize = desc.size;
@@ -295,6 +301,12 @@ namespace RT64 {
         // Once per frame. Everything the CPU writes and the GPU reads within a frame moves
         // to a different slot here, so a frame still in flight is never overwritten.
         frameSlot = (frameSlot + 1) % FrameSlots;
+
+        // Anything retired the last time this slot was current was replaced FrameSlots frames
+        // ago, so every frame that could still have been referencing it has retired too. This
+        // is the only place either list is released.
+        retiredBuffers[frameSlot].clear();
+        retiredStructures[frameSlot].clear();
 
         // Retire this frame's entries into the pool rather than destroying them, so their
         // buffers survive into the next frame and get reused at the same sizes. The vector
@@ -343,13 +355,17 @@ namespace RT64 {
             worker->device->setBottomLevelASBuildInfo(blas.buildInfo, blas.meshes.data(), uint32_t(blas.meshes.size()), true, false);
 
             const uint64_t bufferSize = allocationForSize(blas.buildInfo.accelerationStructureSize);
-            const bool bufferChanged = ensureBuffer(worker->device, blas.buffer, blas.bufferSize, blas.buildInfo.accelerationStructureSize, RenderBufferDesc::AccelerationStructureBuffer(bufferSize));
+            const bool bufferChanged = ensureBuffer(worker->device, blas.buffer, blas.bufferSize, blas.buildInfo.accelerationStructureSize, RenderBufferDesc::AccelerationStructureBuffer(bufferSize), retiredBuffers[frameSlot]);
             const uint64_t scratchSize = allocationForSize(blas.buildInfo.scratchSize);
-            ensureBuffer(worker->device, blas.scratchBuffer, blas.scratchSize, blas.buildInfo.scratchSize, RenderBufferDesc::DefaultBuffer(scratchSize, RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH));
+            ensureBuffer(worker->device, blas.scratchBuffer, blas.scratchSize, blas.buildInfo.scratchSize, RenderBufferDesc::DefaultBuffer(scratchSize, RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH), retiredBuffers[frameSlot]);
 
             // The structure is a view onto its buffer, so it only needs recreating when the
             // buffer moved underneath it.
             if (bufferChanged || (blas.accelerationStructure == nullptr)) {
+                if (blas.accelerationStructure != nullptr) {
+                    retiredStructures[frameSlot].emplace_back(std::move(blas.accelerationStructure));
+                }
+
                 blas.accelerationStructure = worker->device->createAccelerationStructure(RenderAccelerationStructureDesc(RenderAccelerationStructureType::BOTTOM_LEVEL, blas.buffer->at(0), blas.bufferSize));
             }
         }
@@ -508,9 +524,9 @@ namespace RT64 {
         worker->device->setTopLevelASBuildInfo(topLevelASBuildInfo, topLevelASInstances.data(), uint32_t(topLevelASInstances.size()), false, true);
 
         const uint64_t bufferSize = allocationForSize(topLevelASBuildInfo.accelerationStructureSize);
-        const bool bufferChanged = ensureBuffer(worker->device, topLevelASBuffer, topLevelASBufferSize, topLevelASBuildInfo.accelerationStructureSize, RenderBufferDesc::AccelerationStructureBuffer(bufferSize));
+        const bool bufferChanged = ensureBuffer(worker->device, topLevelASBuffer, topLevelASBufferSize, topLevelASBuildInfo.accelerationStructureSize, RenderBufferDesc::AccelerationStructureBuffer(bufferSize), retiredBuffers[frameSlot]);
         const uint64_t scratchSize = allocationForSize(topLevelASBuildInfo.scratchSize);
-        ensureBuffer(worker->device, topLevelASScratchBuffer, topLevelASScratchSize, topLevelASBuildInfo.scratchSize, RenderBufferDesc::DefaultBuffer(scratchSize, RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH));
+        ensureBuffer(worker->device, topLevelASScratchBuffer, topLevelASScratchSize, topLevelASBuildInfo.scratchSize, RenderBufferDesc::DefaultBuffer(scratchSize, RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH), retiredBuffers[frameSlot]);
 
         // plume hands the instance descriptors back already in the backend's own layout and
         // leaves the upload to us. They go straight into an upload heap rather than being
@@ -518,7 +534,7 @@ namespace RT64 {
         const uint64_t instancesSize = uint64_t(topLevelASBuildInfo.instancesBufferData.size());
         if (instancesSize > 0) {
             ensureBuffer(worker->device, topLevelASInstancesSlots[frameSlot], topLevelASInstancesSlotSizes[frameSlot], instancesSize,
-                RenderBufferDesc::UploadBuffer(allocationForSize(instancesSize), RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT));
+                RenderBufferDesc::UploadBuffer(allocationForSize(instancesSize), RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT), retiredBuffers[frameSlot]);
             topLevelASInstancesBuffer = topLevelASInstancesSlots[frameSlot].get();
 
             const RenderRange writtenRange(0, instancesSize);
@@ -528,6 +544,10 @@ namespace RT64 {
         }
 
         if (bufferChanged || (topLevelAS == nullptr)) {
+            if (topLevelAS != nullptr) {
+                retiredStructures[frameSlot].emplace_back(std::move(topLevelAS));
+            }
+
             topLevelAS = worker->device->createAccelerationStructure(RenderAccelerationStructureDesc(RenderAccelerationStructureType::TOP_LEVEL, topLevelASBuffer->at(0), topLevelASBufferSize));
         }
     }
@@ -635,7 +655,7 @@ namespace RT64 {
         }
 
         ensureBuffer(worker->device, shaderBindingTableSlots[frameSlot], shaderBindingTableSlotSizes[frameSlot], tableSize,
-            RenderBufferDesc::UploadBuffer(allocationForSize(tableSize), RenderBufferFlag::SHADER_BINDING_TABLE));
+            RenderBufferDesc::UploadBuffer(allocationForSize(tableSize), RenderBufferFlag::SHADER_BINDING_TABLE), retiredBuffers[frameSlot]);
         shaderBindingTableBuffer = shaderBindingTableSlots[frameSlot].get();
 
         const RenderRange writtenRange(0, tableSize);
@@ -656,6 +676,14 @@ namespace RT64 {
     }
 
     void RaytracingResources::createOutputBuffers(RenderWorker *worker, int width, int height) {
+        // Every recreation of these replaces resources a frame in flight may still be reading,
+        // so when they happen matters. Gated with the rest of the acceleration structure
+        // diagnostics.
+        if (getenv("PDRT64_RT_CHECKAS") != nullptr) {
+            fprintf(stderr, "rt64: RT output buffers (re)created at %dx%d\n", width, height);
+            fflush(stderr);
+        }
+
         assert(worker != nullptr);
         assert((width > 0) && (height > 0));
 

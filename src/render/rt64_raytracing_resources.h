@@ -126,6 +126,15 @@ namespace RT64 {
         std::unique_ptr<RenderAccelerationStructure> topLevelAS;
         std::unique_ptr<RenderBuffer> topLevelASBuffer;
         std::unique_ptr<RenderBuffer> topLevelASScratchBuffer;
+        // Buffers and structures replaced while a frame that referenced them may still be
+        // executing on the GPU. Releasing one at the moment it is replaced is a use after
+        // free: D3D12 does not keep a resource alive because a command list still in flight
+        // references it, and the fault arrives as a device removal with nothing in the debug
+        // layer to say why - every API call was valid. They are held here instead and
+        // released when their slot comes around again, FrameSlots frames later, which is the
+        // same guarantee the per-slot upload buffers rely on.
+        std::vector<std::unique_ptr<RenderBuffer>> retiredBuffers[FrameSlots];
+        std::vector<std::unique_ptr<RenderAccelerationStructure>> retiredStructures[FrameSlots];
         std::unique_ptr<RenderBuffer> topLevelASInstancesSlots[FrameSlots];
         uint64_t topLevelASInstancesSlotSizes[FrameSlots] = {};
         RenderBuffer *topLevelASInstancesBuffer = nullptr;
