@@ -1978,6 +1978,35 @@ namespace RT64 {
                 const float viewMatrixDiff = matrixDifference(drawData.modViewTransforms[proj.transformsIndex], rtScene.curViewMatrix);
                 const float projMatrixDiff = matrixDifference(drawData.modProjTransforms[proj.transformsIndex], rtScene.curProjMatrix);
                 rtProjCompatible = (viewMatrixDiff < Threshold) && (projMatrixDiff < Threshold);
+
+                // How far apart, not just whether. The threshold is 1e-6, which is tight
+                // enough that floating point noise in a per-room transform would fail it,
+                // and the difference between noise and a genuinely different camera is the
+                // difference between a tracer that can reach the room and one that cannot.
+                if (getenv("PDRT64_RT_DUMPPROJ") != nullptr) {
+                    static uint32_t diffLogs = 0;
+                    if (diffLogs++ < 64) {
+                        fprintf(stderr, "rt64:   proj %u matrix diff: view %.9f, proj %.9f -> %s\n",
+                            pr, viewMatrixDiff, projMatrixDiff, rtProjCompatible ? "compatible" : "REJECTED");
+                        if (!rtProjCompatible) {
+                            // The shape of the difference, not just its size. A pure
+                            // translation can be folded into the instance transform of a
+                            // single TLAS; a rotation cannot be, and would need a scene of
+                            // its own.
+                            const auto &pv = drawData.modViewTransforms[proj.transformsIndex];
+                            const auto &cv = rtScene.curViewMatrix;
+                            fprintf(stderr, "rt64:     proj row0 %.4f %.4f %.4f | scene %.4f %.4f %.4f\n",
+                                pv[0][0], pv[0][1], pv[0][2], cv[0][0], cv[0][1], cv[0][2]);
+                            fprintf(stderr, "rt64:     proj row1 %.4f %.4f %.4f | scene %.4f %.4f %.4f\n",
+                                pv[1][0], pv[1][1], pv[1][2], cv[1][0], cv[1][1], cv[1][2]);
+                            fprintf(stderr, "rt64:     proj row2 %.4f %.4f %.4f | scene %.4f %.4f %.4f\n",
+                                pv[2][0], pv[2][1], pv[2][2], cv[2][0], cv[2][1], cv[2][2]);
+                            fprintf(stderr, "rt64:     proj row3 %.4f %.4f %.4f | scene %.4f %.4f %.4f\n",
+                                pv[3][0], pv[3][1], pv[3][2], cv[3][0], cv[3][1], cv[3][2]);
+                        }
+                        fflush(stderr);
+                    }
+                }
             }
 
             // TODO: Remove this condition once multiple heaps per RT scene are supported.
@@ -2124,6 +2153,49 @@ namespace RT64 {
                 }
                 else {
 #               if RT_ENABLED
+                    // PDRT64_RT_DUMPCALL=<a,b,...>: everything known about named draw
+                    // calls. The two large quads that dominate the error against the raster
+                    // render were identified as draw calls 140 and 141 by inverting the
+                    // InstanceId debug view's colour hash (DebugPS.hlsl:64), which is the
+                    // only handle that view gives on which call a pixel belongs to. This
+                    // says what they are.
+                    //
+                    // Placed here rather than inside the raytraced branch, where it used to
+                    // be: the calls that matter now are the ones that do NOT get traced -
+                    // the interleaved layers are built from them - and in there it could
+                    // never print one. rtProj in the line below says which kind each is.
+                    if (const char *dumpCall = getenv("PDRT64_RT_DUMPCALL")) {
+                        const uint32_t callIndex = call.callDesc.callIndex;
+                        char needle[16];
+                        snprintf(needle, sizeof(needle), "%u", callIndex);
+                        bool wanted = false;
+                        for (const char *at = strstr(dumpCall, needle); at != nullptr; at = strstr(at + 1, needle)) {
+                            const char before = (at == dumpCall) ? ',' : at[-1];
+                            const char after = at[strlen(needle)];
+                            wanted = ((before == ',') || (before == ' ')) &&
+                                     ((after == ',') || (after == ' ') || (after == 0));
+                            if (wanted) {
+                                break;
+                            }
+                        }
+
+                        static uint32_t callLogs = 0;
+                        if (wanted && (callLogs++ < 12)) {
+                            const interop::OtherMode &om = call.callDesc.otherMode;
+                            fprintf(stderr, "rt64: call %u: tris %u, cycleType %u, zCmp %d zUpd %d, "
+                                "alphaCompare %u, forceBlend %d alphaCvgSel %d cvgXAlpha %d clrOnCvg %d, "
+                                "blenderInputs 0x%04X, tiles %u, rtProj %d\n",
+                                callIndex, call.callDesc.triangleCount, om.cycleType() >> G_MDSFT_CYCLETYPE,
+                                om.zCmp() ? 1 : 0, om.zUpd() ? 1 : 0, om.alphaCompare() >> G_MDSFT_ALPHACOMPARE,
+                                om.forceBlend() ? 1 : 0, om.alphaCvgSel() ? 1 : 0, om.cvgXAlpha() ? 1 : 0,
+                                om.clrOnCvg() ? 1 : 0, om.blenderInputs(), call.callDesc.tileCount,
+                                rtProj ? 1 : 0);
+                            fprintf(stderr, "rt64:   call %u: usesLOD %d, textDetail %u, combiner L 0x%08X H 0x%08X\n",
+                                callIndex, om_textLOD_isLod(om) ? 1 : 0, om.textDetail(), om.L, om.H);
+                            fflush(stderr);
+                        }
+                    }
+
                     if (rtProj) {
                         instanceDrawCall.type = InstanceDrawCall::Type::Raytracing;
 
@@ -2163,44 +2235,6 @@ namespace RT64 {
                         // mesh non-opaque would pay that on all of the geometry to serve the
                         // small part of it that cuts out. It also lets the traversal take the
                         // opaque path for everything else.
-                        // PDRT64_RT_DUMPCALL=<a,b,...>: everything known about named draw
-                        // calls. The two large quads that dominate the error against the raster
-                        // render were identified as draw calls 140 and 141 by inverting the
-                        // InstanceId debug view's colour hash (DebugPS.hlsl:64), which is the
-                        // only handle that view gives on which call a pixel belongs to. This
-                        // says what they are.
-                        if (const char *dumpCall = getenv("PDRT64_RT_DUMPCALL")) {
-                            const uint32_t callIndex = call.callDesc.callIndex;
-                            char needle[16];
-                            snprintf(needle, sizeof(needle), "%u", callIndex);
-                            bool wanted = false;
-                            for (const char *at = strstr(dumpCall, needle); at != nullptr; at = strstr(at + 1, needle)) {
-                                const char before = (at == dumpCall) ? ',' : at[-1];
-                                const char after = at[strlen(needle)];
-                                wanted = ((before == ',') || (before == ' ')) &&
-                                         ((after == ',') || (after == ' ') || (after == 0));
-                                if (wanted) {
-                                    break;
-                                }
-                            }
-
-                            static uint32_t callLogs = 0;
-                            if (wanted && (callLogs++ < 12)) {
-                                const interop::OtherMode &om = call.callDesc.otherMode;
-                                fprintf(stderr, "rt64: call %u: tris %u, cycleType %u, zCmp %d zUpd %d, "
-                                    "alphaCompare %u, forceBlend %d alphaCvgSel %d cvgXAlpha %d clrOnCvg %d, "
-                                    "blenderInputs 0x%04X, tiles %u, rtProj %d\n",
-                                    callIndex, call.callDesc.triangleCount, om.cycleType() >> G_MDSFT_CYCLETYPE,
-                                    om.zCmp() ? 1 : 0, om.zUpd() ? 1 : 0, om.alphaCompare() >> G_MDSFT_ALPHACOMPARE,
-                                    om.forceBlend() ? 1 : 0, om.alphaCvgSel() ? 1 : 0, om.cvgXAlpha() ? 1 : 0,
-                                    om.clrOnCvg() ? 1 : 0, om.blenderInputs(), call.callDesc.tileCount,
-                                    rtProj ? 1 : 0);
-                                fprintf(stderr, "rt64:   call %u: usesLOD %d, textDetail %u, combiner L 0x%08X H 0x%08X\n",
-                                    callIndex, om_textLOD_isLod(om) ? 1 : 0, om.textDetail(), om.L, om.H);
-                                fflush(stderr);
-                            }
-                        }
-
                         // PDRT64_RT_DUMPBLEND: how many traced draw calls are blended rather
                         // than opaque.
                         //
