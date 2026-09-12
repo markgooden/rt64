@@ -114,29 +114,12 @@ void PrimaryRayGen() {
     // measured with PDRT64_RT_READBACK_INTERLEAVED, layer 0 holds the ceiling and walls and
     // layer 1 the console.
     //
-    // They are two different kinds of draw and they need two different placement rules:
+    // They share one depth buffer with each other, cleared once before the first of them,
+    // so the GPU has already ordered them against one another by the time this runs. What
+    // is left here is a single comparison: that shared depth against the traced hit's.
     //
-    //  - A layer that wrote depth is placed by depth. Its buffer holds what this scene's own
-    //    projection produced, and putting the traced hit through the same RtParams.viewProj
-    //    puts both in that space - no linearisation, and no need to know the game's
-    //    projection convention.
-    //  - A layer that did not write depth cannot be placed that way at any depth value.
-    //    Measured 2026-09-12: layer 1's depth reads the cleared far value at the very pixels
-    //    where its colour is the console. Those draws are placed in the raster path by
-    //    *order* - drawn over the colour target after whatever they cover - so they are
-    //    placed here by order too, comparing the layer's draw call index against the traced
-    //    hit's. Both are indices into the same frame-wide draw call sequence: InstanceID is
-    //    the draw call index (rt64_raytracing_resources.cpp:474) and firstInstanceIndex is
-    //    the last draw call of the raster scene behind the layer
-    //    (rt64_framebuffer_renderer.cpp:2419).
-    //
-    // Coverage is any depth the layer wrote, or any colour it left. Not alpha: measured
-    // 2026-09-12, these targets read alpha zero everywhere, drawn pixels included, so alpha
-    // says nothing about coverage however the target is cleared. The cost of using colour
-    // is that a pixel a layer drew as pure black cannot be told from one it never touched,
-    // and stays with the traced surface.
+    // The traced surface's own depth, in the same 0..1 the layers' buffer holds.
     float tracedLayerZ = 1.0f;
-    int tracedDrawCall = 0x7FFFFFFF;
     if (payload.instanceId >= 0) {
         // From the ray distance and this projection's own near and far, not through
         // viewProj. The matrix path was measured on 2026-09-12 reading >= 1.0 on 77% of
@@ -147,52 +130,51 @@ void PrimaryRayGen() {
         const float3 viewAxis = normalize(-RtParams.viewI[2].xyz);
         const float viewDepth = max(payload.t * dot(ray.Direction, viewAxis), RtParams.nearDist);
         tracedLayerZ = saturate(RtParams.farDist * (viewDepth - RtParams.nearDist) / (viewDepth * (RtParams.farDist - RtParams.nearDist)));
-        tracedDrawCall = payload.instanceId;
-    }
-    else {
-        // A miss is behind every layer under both rules, which is what puts the layers over
-        // the background where the tracer hit nothing.
-        tracedDrawCall = -1;
     }
 
-    // Appended in draw order (rt64_framebuffer_renderer.cpp:2419), so a later layer that also
-    // wins overwrites an earlier one - which is what drawing them in order does.
+    // One depth test for the whole set of layers.
+    //
+    // The layers now share a depth buffer, cleared once before the first of them
+    // (rt64_framebuffer_renderer.cpp, rt64_raytracing_resources.cpp), so a later layer's
+    // draws were depth tested against the earlier ones exactly as the game's own single
+    // depth buffer would have tested them. That does the layer-against-layer ordering on the
+    // GPU where it belongs, and leaves this with one comparison to make: the nearest layer
+    // surface against the traced one.
+    //
+    // Coverage is the colour, since a layer that lost the depth test wrote nothing into its
+    // own colour target. A surface the game draws as pure black is indistinguishable from
+    // one it never drew, which is the one thing this rule cannot see.
     float3 layerColor = float3(0.0f, 0.0f, 0.0f);
-    bool layerInFront = false;
-
-
+    bool layerCovered = false;
     for (uint i = 0; i < RtParams.interleavedRastersCount; i++) {
         const InterleavedRaster raster = interleavedRasters[i];
 
-        // The layers are not the size the trace runs at. Measured 2026-09-12: the
-        // interleaved targets are 960x660, the scene's own size, while the RT dispatch is
-        // 640x440 - createOutputBuffers scales the RT buffers by resolutionScale
-        // (rt64_raytracing_resources.cpp:702) and updateInterleavedRenderTargets does not
-        // (rt64_framebuffer_renderer.cpp:2668). Indexing a layer with the ray's own pixel
-        // therefore read the top-left corner of it, which is how every layer has been
-        // placed since they were first sampled. A normalised coordinate needs neither
-        // size to be known here and survives any resolutionScale.
-
-        // Colour is filtered rather than point sampled: the layer is larger than the trace,
-        // so taking one texel of it throws away the difference and aliases every edge.
-        // Depth stays a texel load - interpolating depth across a silhouette invents
-        // surfaces that are in neither of the two it sits between.
+        // The layers are not the size the trace runs at - measured 2026-09-12, the targets
+        // are the scene's own 960x660 against a 640x440 dispatch, because createOutputBuffers
+        // applies resolutionScale (rt64_raytracing_resources.cpp:702) and
+        // updateInterleavedRenderTargets does not. Indexing them with the ray's pixel read
+        // the top-left corner of every layer. A normalised coordinate needs neither size and
+        // survives any scale, and it is how compose reads these same buffers
+        // (shaders/ComposePS.hlsl:27).
         const float2 layerUV = (float2(pixel) + 0.5f) * RtParams.resolution.zw;
         const float4 rasterColor = gTextures[raster.colorTextureIndex].SampleLevel(gLinearClampClampSampler, layerUV, 0);
-        uint layerWidth = 0;
-        uint layerHeight = 0;
-        gTextures[raster.depthTextureIndex].GetDimensions(layerWidth, layerHeight);
-        const float layerZ = gTextures[raster.depthTextureIndex][uint2(layerUV * float2(layerWidth, layerHeight))].r;
-        const bool wroteDepth = (layerZ < 1.0f);
-        if (!wroteDepth && !any(rasterColor.rgb > 0.0f)) {
-            continue;
-        }
-
-        const bool inFront = wroteDepth ? (layerZ < tracedLayerZ) : (int(raster.firstInstanceIndex) > tracedDrawCall);
-        if (inFront) {
+        if (any(rasterColor.rgb > 0.0f)) {
             layerColor = rasterColor.rgb;
-            layerInFront = true;
+            layerCovered = true;
         }
+    }
+
+    bool layerInFront = false;
+    if (layerCovered) {
+        // Every layer carries the same depth index now, so layer zero's is the shared buffer.
+        // A texel load rather than a filtered sample: interpolating depth across a silhouette
+        // invents a surface that is in neither of the two it sits between.
+        const float2 layerUV = (float2(pixel) + 0.5f) * RtParams.resolution.zw;
+        uint depthWidth = 0;
+        uint depthHeight = 0;
+        gTextures[interleavedRasters[0].depthTextureIndex].GetDimensions(depthWidth, depthHeight);
+        const float layerZ = gTextures[interleavedRasters[0].depthTextureIndex][uint2(layerUV * float2(depthWidth, depthHeight))].r;
+        layerInFront = (layerZ < tracedLayerZ);
     }
 
     // Cleared rather than left stale: compose reads all of these unconditionally

@@ -852,7 +852,14 @@ namespace RT64 {
 
         for (uint32_t i = 0; i < targetCount; i++) {
             RenderTarget *colorTarget = interleavedColorTargetVector[i].get();
-            RenderTarget *depthTarget = interleavedDepthTargetVector[i].get();
+            // One depth target for every layer, not one each. The layers are interleaved
+            // between RT scenes but among themselves they are ordinary draws sharing the
+            // game's single depth buffer, and a per-layer depth buffer cleared per layer
+            // throws that away: nothing then orders one layer against another, and the
+            // composite cannot tell a layer in front from one behind. Measured
+            // 2026-09-12 as black drawn over the console, which is layer 0's opening
+            // winning on depth against a layer 1 that holds the console itself.
+            RenderTarget *depthTarget = interleavedDepthTargetVector[0].get();
 
             // KNOWN DEFECT, not yet fixed. setupColor and setupDepth release the existing
             // texture and allocate a new one every time they are called
@@ -870,8 +877,10 @@ namespace RT64 {
             // dependency needs to be understood before it is removed.
             colorTarget->setupColor(worker, uint32_t(width), uint32_t(height));
             colorTarget->setupColorFramebuffer(worker);
-            depthTarget->setupDepth(worker, uint32_t(width), uint32_t(height));
-            depthTarget->setupDepthFramebuffer(worker);
+            if (i == 0) {
+                depthTarget->setupDepth(worker, uint32_t(width), uint32_t(height));
+                depthTarget->setupDepthFramebuffer(worker);
+            }
 
             RenderFramebufferKey framebufferKey;
             framebufferKey.modifierKey = i;

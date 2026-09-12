@@ -1689,7 +1689,7 @@ namespace RT64 {
                     bool interleavedDepthState = false;
                     const uint32_t sceneIndex = rtScene.interleavedRasters[i].rasterSceneIndex;
                     RenderTarget *colorRenderTarget = rtResources->interleavedColorTargetVector[i].get();
-                    RenderTarget *depthRenderTarget = rtResources->interleavedDepthTargetVector[i].get();
+                    RenderTarget *depthRenderTarget = rtResources->interleavedDepthTargetVector[0].get();
                     worker->commandList->barriers(RenderBarrierStage::GRAPHICS, {
                         RenderTextureBarrier(colorRenderTarget->texture.get(), RenderTextureLayout::COLOR_WRITE),
                         RenderTextureBarrier(depthRenderTarget->texture.get(), RenderTextureLayout::DEPTH_WRITE)
@@ -1698,7 +1698,12 @@ namespace RT64 {
                     RenderFramebufferStorage *fbStorage = rtResources->interleavedFramebufferStorageVector[i].get();
                     worker->commandList->setFramebuffer(fbStorage->colorDepthWrite.get());
                     worker->commandList->clearColor();
-                    worker->commandList->clearDepth();
+                    // Cleared once, before the first layer. The layers share this buffer so that
+                    // a later layer's draws are depth tested against the earlier ones, which is
+                    // what the game's single depth buffer does for the same draws.
+                    if (i == 0) {
+                        worker->commandList->clearDepth();
+                    }
 
                     submitDepthAccess(worker, fbStorage, false, interleavedDepthState);
                     submitRasterScene(worker, framebuffer, fbStorage, targetDrawCall.rasterScenes[sceneIndex], interleavedDepthState);
@@ -2662,14 +2667,23 @@ namespace RT64 {
             interleavedRastersCount = static_cast<uint32_t>(chosenRtScene->interleavedRasters.size());
             rtResources->updateInterleavedRenderTargets(worker, chosenRtScene->screenWidth, chosenRtScene->screenHeight, interleavedRastersCount, framebufferTarget->multisampling, framebufferTarget->usesHDR);
 
+            // One depth target, shared by every layer, so the composite has a single depth
+            // to compare against the traced surface (rt64_raytracing_resources.cpp). It is
+            // registered once: getTextureIndex appends a descriptor each time it is called,
+            // and calling it per layer would spend one heap slot per layer on the same
+            // texture.
+            RenderTarget *sharedDepthTarget = (interleavedRastersCount > 0) ? rtResources->interleavedDepthTargetVector[0].get() : nullptr;
+            const uint32_t sharedDepthIndex = (sharedDepthTarget != nullptr) ? getTextureIndex(sharedDepthTarget) : 0;
+            if (sharedDepthTarget != nullptr) {
+                chosenFramebuffer->transitionRenderTargetSet.emplace(sharedDepthTarget);
+            }
+
             for (uint32_t i = 0; i < interleavedRastersCount; i++) {
                 auto &intRaster = chosenRtScene->interleavedRasters[i];
                 RenderTarget *colorTarget = rtResources->interleavedColorTargetVector[i].get();
-                RenderTarget *depthTarget = rtResources->interleavedDepthTargetVector[i].get();
                 intRaster.colorTextureIndex = getTextureIndex(colorTarget);
-                intRaster.depthTextureIndex = getTextureIndex(depthTarget);
+                intRaster.depthTextureIndex = sharedDepthIndex;
                 chosenFramebuffer->transitionRenderTargetSet.emplace(colorTarget);
-                chosenFramebuffer->transitionRenderTargetSet.emplace(depthTarget);
             }
 
             // PDRT64_RT_CHECKAS: the ordering keys the composite compares. firstInstanceIndex
