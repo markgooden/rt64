@@ -175,6 +175,12 @@ namespace RT64 {
         return hlslpp::normalize(-viewI[2].xyz);
     }
 
+    // G_TL_LOD in the other mode's H word. The shared header's accessors are HLSL-shaped and
+    // this is the one bit the CPU side needs to tally.
+    static bool om_textLOD_isLod(const interop::OtherMode &om) {
+        return (om.H & (1U << G_MDSFT_TEXTLOD)) != 0;
+    }
+
     RenderColor toRenderColor(hlslpp::float4 v) {
         return { v.x, v.y, v.z, v.w };
     }
@@ -2162,6 +2168,8 @@ namespace RT64 {
                                     om.forceBlend() ? 1 : 0, om.alphaCvgSel() ? 1 : 0, om.cvgXAlpha() ? 1 : 0,
                                     om.clrOnCvg() ? 1 : 0, om.blenderInputs(), call.callDesc.tileCount,
                                     rtProj ? 1 : 0);
+                                fprintf(stderr, "rt64:   call %u: usesLOD %d, textDetail %u, combiner L 0x%08X H 0x%08X\n",
+                                    callIndex, om_textLOD_isLod(om) ? 1 : 0, om.textDetail(), om.L, om.H);
                                 fflush(stderr);
                             }
                         }
@@ -2179,6 +2187,7 @@ namespace RT64 {
                             static uint32_t tracedCalls = 0, forceBlendCalls = 0;
                             static uint32_t cvgXAlphaCalls = 0, alphaCvgSelCalls = 0, alphaTestCalls = 0;
                             static uint32_t multiTileCalls = 0, multiTileTris = 0, totalTris = 0;
+                            static uint32_t usesLodCalls = 0, usesLodTris = 0;
                             tracedCalls++;
 
                             // Tile count, because the hit shader samples tile zero only (the
@@ -2186,6 +2195,17 @@ namespace RT64 {
                             // triangles as well as by call, since what matters is how much of
                             // the frame is shaded from the wrong tile, not how many calls are.
                             totalTris += call.callDesc.triangleCount;
+
+                            // Whether the call selects its tile pair by LOD at all. computeLOD
+                            // only picks tiles when this is set; otherwise the raster path uses
+                            // tiles zero and one, which is what the hit shader already samples.
+                            // So tileCount > 1 does not by itself mean the two paths disagree
+                            // about which tile, and this is the number that says whether they
+                            // can.
+                            if (om_textLOD_isLod(call.callDesc.otherMode)) {
+                                usesLodCalls++;
+                                usesLodTris += call.callDesc.triangleCount;
+                            }
                             if (call.callDesc.tileCount > 1) {
                                 multiTileCalls++;
                                 multiTileTris += call.callDesc.triangleCount;
@@ -2201,6 +2221,9 @@ namespace RT64 {
                                     tracedCalls, forceBlendCalls, cvgXAlphaCalls, alphaCvgSelCalls, alphaTestCalls,
                                     multiTileCalls, multiTileTris, totalTris,
                                     (totalTris > 0) ? (100.0 * double(multiTileTris) / double(totalTris)) : 0.0);
+                                fprintf(stderr, "rt64:   usesLOD %u calls / %u of %u tris (%.1f%%)\n",
+                                    usesLodCalls, usesLodTris, totalTris,
+                                    (totalTris > 0) ? (100.0 * double(usesLodTris) / double(totalTris)) : 0.0);
                                 fflush(stderr);
                             }
                         }

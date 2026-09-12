@@ -416,8 +416,20 @@ static SurfaceShading shadeSurface(RenderIndices renderIndices, uint i0, uint i1
     ccInputs.keyCenter = instanceRDPParams[instanceIndex].keyCenter;
     ccInputs.keyScale = instanceRDPParams[instanceIndex].keyScale;
 
-    // No LOD fraction: that is the same missing ray footprint that pins sampling to mip zero.
-    ccInputs.lodFraction = 0.0f;
+    // The LOD fraction the raster path would have computed.
+    //
+    // computeLOD has two branches (TextureSampler.hlsli:27-71). A draw call that does not use
+    // LOD takes the else, which leaves the tile pair at zero and one - which is what is sampled
+    // above - and sets lodFraction to **1.0**, not 0. This was hardcoded to 0, so every such
+    // call fed the combiner the opposite end of its TEXEL0/TEXEL1 blend wherever the combiner
+    // references LOD_FRACTION (shared/rt64_color_combiner.h:499, :531). On a surface whose
+    // combiner blends a base and a detail tile that is the difference between showing one
+    // texture and showing the other.
+    //
+    // A call that does use LOD still needs the ray footprint to pick its tile pair and its
+    // fraction, and still gets 0 here. That half is unchanged.
+    const bool usesLOD = (otherMode.textLOD() == G_TL_LOD);
+    ccInputs.lodFraction = usesLOD ? 0.0f : 1.0f;
     ccInputs.primLodFrac = instanceRDPParams[instanceIndex].primLOD.x;
     ccInputs.noise = nextRand(randomSeed);
     ccInputs.K4 = (instanceRDPParams[instanceIndex].convertK[4] / 255.0f);
