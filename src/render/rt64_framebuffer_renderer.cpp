@@ -1674,7 +1674,18 @@ namespace RT64 {
                 // Draw all the interleaved rasterized buffers that will be used in the render target.
                 thread_local std::vector<RenderTextureBarrier> interleavedBarriers;
                 interleavedBarriers.clear();
-                for (uint32_t i = 0; (i < interleavedRastersCount) && (rtStageMask() & RtStageInterleaved); i++) {
+                // interleavedRastersCount, the interleaved render targets and the descriptor
+                // indices written into interleavedRasters all belong to the one scene
+                // endFramebuffers chose (:2653-2670). A framebuffer can carry several RT
+                // scenes, and the others have interleavedRasters of their own - usually empty
+                // - so indexing those with the chosen scene's count runs past the end. On an
+                // empty vector that is a null data(), and it faults the first time a frame
+                // produces a second scene: about 80 seconds into Defection, deterministically.
+                //
+                // The same reasoning as submitRaytracingScene's own guard (:1038): the
+                // resources exist for one scene, so only that scene may use them.
+                const bool sceneOwnsInterleaved = (&rtScene == submittedRtScene);
+                for (uint32_t i = 0; sceneOwnsInterleaved && (i < interleavedRastersCount) && (rtStageMask() & RtStageInterleaved); i++) {
                     bool interleavedDepthState = false;
                     const uint32_t sceneIndex = rtScene.interleavedRasters[i].rasterSceneIndex;
                     RenderTarget *colorRenderTarget = rtResources->interleavedColorTargetVector[i].get();
