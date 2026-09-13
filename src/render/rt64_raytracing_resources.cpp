@@ -921,6 +921,10 @@ namespace RT64 {
             composeSet = std::make_unique<RaytracingComposeDescriptorSet>(samplerLibrary, device);
             indirectFilterSets[0] = std::make_unique<GaussianFilterDescriptorSet>(samplerLibrary, device);
             indirectFilterSets[1] = std::make_unique<GaussianFilterDescriptorSet>(samplerLibrary, device);
+            directEdgeFilterSets[0] = std::make_unique<RtEdgeFilterDescriptorSet>(device);
+            directEdgeFilterSets[1] = std::make_unique<RtEdgeFilterDescriptorSet>(device);
+            indirectEdgeFilterSets[0] = std::make_unique<RtEdgeFilterDescriptorSet>(device);
+            indirectEdgeFilterSets[1] = std::make_unique<RtEdgeFilterDescriptorSet>(device);
             downscaleSet = std::make_unique<BicubicScalingDescriptorSet>(samplerLibrary, device);
             lumaSet = std::make_unique<LuminanceHistogramDescriptorSet>(device);
             lumaAvgSet = std::make_unique<HistogramAverageDescriptorSet>(device);
@@ -951,6 +955,18 @@ namespace RT64 {
         for (uint32_t k = 0; k < 2; k++) {
             indirectFilterSets[k]->setTexture(indirectFilterSets[k]->gInput, filteredIndirectLightTexture[k].get(), RenderTextureLayout::SHADER_READ);
             indirectFilterSets[k]->setTexture(indirectFilterSets[k]->gOutput, filteredIndirectLightTexture[1 - k].get(), RenderTextureLayout::GENERAL);
+
+            // The same ping-pong, plus the guides. normalRoughnessTexture and depthTexture
+            // are the current half of the pair primary visibility wrote this frame.
+            const uint32_t cur = swapBuffers ? 1 : 0;
+            directEdgeFilterSets[k]->setTexture(directEdgeFilterSets[k]->gInput, filteredDirectLightTexture[k].get(), RenderTextureLayout::SHADER_READ);
+            directEdgeFilterSets[k]->setTexture(directEdgeFilterSets[k]->gOutput, filteredDirectLightTexture[1 - k].get(), RenderTextureLayout::GENERAL);
+            directEdgeFilterSets[k]->setTexture(directEdgeFilterSets[k]->gNormal, normalRoughnessTexture[cur].get(), RenderTextureLayout::SHADER_READ);
+            directEdgeFilterSets[k]->setTexture(directEdgeFilterSets[k]->gDepth, depthTexture[cur].get(), RenderTextureLayout::SHADER_READ);
+            indirectEdgeFilterSets[k]->setTexture(indirectEdgeFilterSets[k]->gInput, filteredIndirectLightTexture[k].get(), RenderTextureLayout::SHADER_READ);
+            indirectEdgeFilterSets[k]->setTexture(indirectEdgeFilterSets[k]->gOutput, filteredIndirectLightTexture[1 - k].get(), RenderTextureLayout::GENERAL);
+            indirectEdgeFilterSets[k]->setTexture(indirectEdgeFilterSets[k]->gNormal, normalRoughnessTexture[cur].get(), RenderTextureLayout::SHADER_READ);
+            indirectEdgeFilterSets[k]->setTexture(indirectEdgeFilterSets[k]->gDepth, depthTexture[cur].get(), RenderTextureLayout::SHADER_READ);
         }
 
         downscaleSet->setTexture(downscaleSet->gInput, outputTexture[cur].get(), RenderTextureLayout::SHADER_READ);

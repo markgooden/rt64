@@ -360,6 +360,29 @@ namespace RT64 {
         }
     };
 
+    // The edge aware lighting filter. Two guide textures the Gaussian does not have: the
+    // shading normal and the view depth primary visibility already writes, which is what lets
+    // it stop at a silhouette instead of blurring across one.
+    struct RtEdgeFilterDescriptorSet : RenderDescriptorSetBase {
+        uint32_t gInput;
+        uint32_t gNormal;
+        uint32_t gDepth;
+        uint32_t gOutput;
+
+        RtEdgeFilterDescriptorSet(RenderDevice *device = nullptr) {
+            builder.begin();
+            gInput = builder.addTexture(1);
+            gNormal = builder.addTexture(2);
+            gDepth = builder.addTexture(3);
+            gOutput = builder.addReadWriteTexture(4);
+            builder.end();
+
+            if (device != nullptr) {
+                create(device);
+            }
+        }
+    };
+
     struct HistogramAverageDescriptorSet : RenderDescriptorSetBase {
         uint32_t LuminanceHistogram;
         uint32_t LuminanceOutput;

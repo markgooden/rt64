@@ -221,6 +221,12 @@ namespace RT64 {
         // bind to is already built unconditionally in ShaderLibrary.
         std::unique_ptr<RaytracingComposeDescriptorSet> composeSet;
         std::unique_ptr<GaussianFilterDescriptorSet> indirectFilterSets[2];
+
+        // Ping-pong sets for the edge aware filter: [k] reads filtered[k] and writes
+        // filtered[1 - k], so successive passes alternate between the two halves and the
+        // last one has to land in [1], which is what compose reads.
+        std::unique_ptr<RtEdgeFilterDescriptorSet> directEdgeFilterSets[2];
+        std::unique_ptr<RtEdgeFilterDescriptorSet> indirectEdgeFilterSets[2];
         std::unique_ptr<BicubicScalingDescriptorSet> downscaleSet;
         std::unique_ptr<LuminanceHistogramDescriptorSet> lumaSet;
         std::unique_ptr<HistogramAverageDescriptorSet> lumaAvgSet;

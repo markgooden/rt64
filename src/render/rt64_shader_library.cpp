@@ -18,6 +18,7 @@
 #include "shaders/FbWriteDepthCS.hlsl.spirv.h"
 #include "shaders/FbWriteDepthCSMS.hlsl.spirv.h"
 #include "shaders/GaussianFilterRGB3x3CS.hlsl.spirv.h"
+#include "shaders/RtEdgeFilterCS.hlsl.spirv.h"
 #include "shaders/BoxFilterCS.hlsl.spirv.h"
 #include "shaders/BicubicScalingCS.hlsl.spirv.h"
 #include "shaders/HistogramAverageCS.hlsl.spirv.h"
@@ -64,6 +65,7 @@
 #   include "shaders/FbWriteDepthCS.hlsl.dxil.h"
 #   include "shaders/FbWriteDepthCSMS.hlsl.dxil.h"
 #   include "shaders/GaussianFilterRGB3x3CS.hlsl.dxil.h"
+#   include "shaders/RtEdgeFilterCS.hlsl.dxil.h"
 #   include "shaders/BoxFilterCS.hlsl.dxil.h"
 #   include "shaders/BicubicScalingCS.hlsl.dxil.h"
 #   include "shaders/HistogramAverageCS.hlsl.dxil.h"
@@ -436,6 +438,20 @@ namespace RT64 {
             std::unique_ptr<RenderShader> computeShader = device->createShader(CREATE_SHADER_INPUTS(GaussianFilterRGB3x3CSBlobDXIL, GaussianFilterRGB3x3CSBlobSPIRV, GaussianFilterRGB3x3CSBlobMSL, "CSMain", shaderFormat));
             RenderComputePipelineDesc pipelineDesc(gaussianFilterRGB3x3.pipelineLayout.get(), computeShader.get(), 8, 8, 1);
             gaussianFilterRGB3x3.pipeline = device->createComputePipeline(pipelineDesc);
+        }
+
+        // Edge aware lighting filter.
+        {
+            RtEdgeFilterDescriptorSet descriptorSet;
+            layoutBuilder.begin();
+            layoutBuilder.addPushConstant(0, 0, sizeof(uint32_t) * 8, RenderShaderStageFlag::COMPUTE);
+            layoutBuilder.addDescriptorSet(descriptorSet);
+            layoutBuilder.end();
+            rtEdgeFilter.pipelineLayout = layoutBuilder.create(device);
+
+            std::unique_ptr<RenderShader> computeShader = device->createShader(CREATE_SHADER_INPUTS(RtEdgeFilterCSBlobDXIL, RtEdgeFilterCSBlobSPIRV, RtEdgeFilterCSBlobMSL, "CSMain", shaderFormat));
+            RenderComputePipelineDesc pipelineDesc(rtEdgeFilter.pipelineLayout.get(), computeShader.get(), 8, 8, 1);
+            rtEdgeFilter.pipeline = device->createComputePipeline(pipelineDesc);
         }
 
         // Histogram average.

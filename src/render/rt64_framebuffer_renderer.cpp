@@ -110,6 +110,16 @@ namespace RT64 {
     // than misplacing a highlight, and a scene that behaves differently needs a way back.
     // PDRT64_RT_SMOOTHNORMALS=0 turns off the welded smooth normals and leaves the hit shader
     // with the triangle's own, which is what every surface in the game had until 2026-09-13.
+    // PDRT64_RT_FILTER=0 leaves the traced light unfiltered, which is what compose received
+    // before the edge aware cascade existed.
+    static bool rtEdgeFilterEnabled() {
+        static const bool enabled = []() {
+            const char *env = getenv("PDRT64_RT_FILTER");
+            return (env == nullptr) || (env[0] != '0');
+        }();
+        return enabled;
+    }
+
     static bool rtSmoothNormals() {
         static const bool enabled = []() {
             const char *env = getenv("PDRT64_RT_SMOOTHNORMALS");
@@ -1286,8 +1296,74 @@ namespace RT64 {
             worker->commandList->barriers(RenderBarrierStage::COMPUTE, afterCopyBarriers, uint32_t(std::size(afterCopyBarriers)));
         }
 
-        // Apply a gaussian filter to the indirect light with a compute shader.
-        if (denoiseGI) {
+        // Filter the traced light.
+        //
+        // Both buffers hold light the tracer sampled rather than computed - a handful of
+        // shadow rays per light, one bounce per pixel - so both are noisy, and neither carries
+        // the game's baked shade any more: that has its own buffer and is added by compose
+        // unfiltered (RaytracingLib.hlsl's PrimaryRayGen).
+        //
+        // An a-trous cascade: the same 5x5 kernel with its taps spread 1, 2, 4, 8 pixels
+        // apart, which covers a wide radius in four passes. Each pass is edge aware, weighted
+        // by how much the surface under a tap agrees with the surface under the centre, so it
+        // stops where the noise stops rather than smearing a shadow across a silhouette.
+        //
+        // PDRT64_RT_FILTER=0 turns it off and leaves the raw copies, which is what every frame
+        // before 2026-09-13 composed.
+        if (rtEdgeFilterEnabled() && (rtStageMask() & RtStageFilter)) {
+            const uint32_t ThreadGroupWorkCount = 8;
+            const uint32_t dispatchX = (rtResources->textureWidth + ThreadGroupWorkCount - 1) / ThreadGroupWorkCount;
+            const uint32_t dispatchY = (rtResources->textureHeight + ThreadGroupWorkCount - 1) / ThreadGroupWorkCount;
+            const ShaderRecord &edgeFilter = shaderLibrary->rtEdgeFilter;
+
+            struct EdgeFilterCB {
+                uint32_t textureSize[2];
+                float texelSize[2];
+                int32_t stepSize;
+                float normalSigma;
+                float depthSigma;
+                float padding;
+            };
+
+            EdgeFilterCB filterCB = {};
+            filterCB.textureSize[0] = rtResources->textureWidth;
+            filterCB.textureSize[1] = rtResources->textureHeight;
+            filterCB.texelSize[0] = 1.0f / rtResources->textureWidth;
+            filterCB.texelSize[1] = 1.0f / rtResources->textureHeight;
+            filterCB.normalSigma = 32.0f;
+            filterCB.depthSigma = 64.0f;
+
+            // Four passes, so the result lands back in [1] where compose reads it.
+            const int PassCount = 4;
+            for (int i = 0; i < PassCount; i++) {
+                filterCB.stepSize = 1 << i;
+
+                // [1] is both the input of the first pass and the output of the last, so the
+                // cascade has to start from it: set k alternates from 1.
+                const int k = (i % 2) ? 0 : 1;
+                worker->commandList->setPipeline(edgeFilter.pipeline.get());
+                worker->commandList->setComputePipelineLayout(edgeFilter.pipelineLayout.get());
+                worker->commandList->setComputePushConstants(0, &filterCB);
+                worker->commandList->setComputeDescriptorSet(rtResources->directEdgeFilterSets[k]->get(), 0);
+                worker->commandList->dispatch(dispatchX, dispatchY, 1);
+
+                if (denoiseGI) {
+                    worker->commandList->setComputeDescriptorSet(rtResources->indirectEdgeFilterSets[k]->get(), 0);
+                    worker->commandList->dispatch(dispatchX, dispatchY, 1);
+                }
+
+                const RenderTextureBarrier afterPassBarriers[] = {
+                    RenderTextureBarrier(rtResources->filteredDirectLightTexture[k].get(), RenderTextureLayout::GENERAL),
+                    RenderTextureBarrier(rtResources->filteredDirectLightTexture[1 - k].get(), RenderTextureLayout::SHADER_READ),
+                    RenderTextureBarrier(rtResources->filteredIndirectLightTexture[k].get(), RenderTextureLayout::GENERAL),
+                    RenderTextureBarrier(rtResources->filteredIndirectLightTexture[1 - k].get(), RenderTextureLayout::SHADER_READ)
+                };
+
+                worker->commandList->barriers(RenderBarrierStage::COMPUTE, afterPassBarriers, uint32_t(std::size(afterPassBarriers)));
+            }
+        }
+        // The scene-blind gaussian this replaces, kept reachable for comparison.
+        else if (denoiseGI) {
             for (int i = 0; i < 5; i++) {
                 const uint32_t ThreadGroupWorkCount = 8;
                 uint32_t dispatchX = (rtResources->textureWidth + ThreadGroupWorkCount - 1) / ThreadGroupWorkCount;

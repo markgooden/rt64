@@ -533,6 +533,7 @@ build_compute_shader(rt64 "src/shaders/FbWriteColorCS.hlsl" "src/shaders/FbWrite
 build_compute_shader(rt64 "src/shaders/FbWriteDepthCS.hlsl")
 build_compute_shader(rt64 "src/shaders/FbWriteDepthCS.hlsl" "src/shaders/FbWriteDepthCSMS.hlsl" "-D MULTISAMPLING")
 build_compute_shader(rt64 "src/shaders/GaussianFilterRGB3x3CS.hlsl")
+build_compute_shader(rt64 "src/shaders/RtEdgeFilterCS.hlsl")
 build_compute_shader(rt64 "src/shaders/BoxFilterCS.hlsl")
 build_compute_shader(rt64 "src/shaders/BicubicScalingCS.hlsl")
 build_compute_shader(rt64 "src/shaders/HistogramAverageCS.hlsl")
