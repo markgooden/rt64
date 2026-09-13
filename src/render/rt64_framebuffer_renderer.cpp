@@ -100,11 +100,19 @@ namespace RT64 {
     // transform, not noise, and 75.8% of the frame goes untraced because of it. A TLAS instance
     // can carry exactly that transform, which is what this turns on.
     //
-    // Off by default while it is unproven: with it on, geometry that used to arrive correctly
-    // through the raster path arrives through the tracer instead, so a wrong transform loses
-    // the room rather than misplacing a highlight.
+    // On by default since 2026-09-13, having been measured rather than assumed. level.0000
+    // against the OpenGL reference goes from 19.26 mean error and +0.4962 edge NCC with it off
+    // to 7.81 and +0.7489 with it on, where RT64's own raster path scores 6.12 and +0.4671 -
+    // so the traced image is within 1.7 per channel of the raster path and better aligned than
+    // it. The game runs 165 seconds in Defection with it on and renders the level.
+    //
+    // PDRT64_RT_JOINVIEWS=0 turns it off, because a wrong transform loses the geometry rather
+    // than misplacing a highlight, and a scene that behaves differently needs a way back.
     static bool rtJoinViews() {
-        static const bool enabled = (getenv("PDRT64_RT_JOINVIEWS") != nullptr);
+        static const bool enabled = []() {
+            const char *env = getenv("PDRT64_RT_JOINVIEWS");
+            return (env == nullptr) || (env[0] != '0');
+        }();
         return enabled;
     }
 #endif
