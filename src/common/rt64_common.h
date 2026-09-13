@@ -37,6 +37,22 @@ namespace RT64 {
     // for. Primary visibility therefore traces 0xF7 (shaders/RaytracingLib.hlsl).
     static const unsigned int BlendedRayQueryMask = 0x8;
 
+    // Geometry the raster path draws that the tracer does not shade, present in the BVH only
+    // so that rays stop at it.
+    //
+    // Without it the tracer's world is only the draws it took, and a primary ray passes
+    // straight through anything left behind and hits whatever is on the far side - which is
+    // why a playthrough on 2026-09-13 saw guards through a grille wall. Compose cannot repair
+    // that afterwards: the game clears depth mid frame, so the wall's depth is gone by the
+    // time compose could compare against it, and only the BVH still knows where the wall is.
+    //
+    // Carried instead of the depth masks, like BlendedRayQueryMask. Primary visibility
+    // therefore traces 0xE7 - every depth mask, neither blended nor occluder - and asks about
+    // occluders separately, so what the tracer *shades* is unchanged and only what stops a ray
+    // grows. Shadow rays trace 0xFF and pick these up with no change at all, which is walls
+    // casting shadows again.
+    static const unsigned int RasterOccluderRayQueryMask = 0x10;
+
     // Error string for last error or exception that was caught.
     extern std::string GlobalLastError;
 

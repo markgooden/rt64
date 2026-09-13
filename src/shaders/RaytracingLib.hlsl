@@ -95,12 +95,59 @@ void PrimaryRayGen() {
     payload.t = -1.0f;
     payload.instanceId = -1;
 
-    // Everything except the blended surfaces. A draw call is tagged with one of the two depth
-    // masks depending on whether it writes or tests depth, and primary visibility wants all of
-    // those; a surface the game blends carries BlendedRayQueryMask (0x8) instead, and tracing
-    // it here would draw it solid over whatever is behind it because transparency is a stub.
-    // 0xF7 is 0xFF with that bit cleared (common/rt64_common.h).
-    TraceRay(SceneBVH, RAY_FLAG_NONE, 0xF7, 0, 0, 0, ray, payload);
+    // Everything except the blended surfaces and the occluders. A draw call is tagged with one
+    // of the two depth masks depending on whether it writes or tests depth, and primary
+    // visibility wants all of those; a surface the game blends carries BlendedRayQueryMask
+    // (0x8) instead, and tracing it here would draw it solid over whatever is behind it because
+    // transparency is a stub. Geometry the raster path owns carries
+    // RasterOccluderRayQueryMask (0x10) and is asked about separately below, so that it stops
+    // rays without being shaded here. 0xE7 is 0xFF with both bits cleared
+    // (common/rt64_common.h).
+    TraceRay(SceneBVH, RAY_FLAG_NONE, 0xE7, 0, 0, 0, ray, payload);
+
+    // Is anything the raster path drew in front of what was just traced?
+    //
+    // The tracer's world is only the draws it took. Everything else - a wall on another
+    // projection, a surface left behind because it is blended - is invisible to the trace
+    // above, so the ray flies through it and returns whatever is on the far side. That is how
+    // a playthrough came to see guards through a grille wall.
+    //
+    // Bounded by the traced hit, so this asks the only question that matters: is the raster
+    // path's geometry nearer? On a miss the bound is the far plane, which is the case that
+    // matters most - a wall in front of nothing traced still has to win.
+    //
+    // ACCEPT_FIRST_HIT_AND_END_SEARCH because any blocker will do, and the shadow hit group
+    // and miss shader (the two ones) because they exist to answer exactly this and cost
+    // nothing to reuse.
+    // No runtime flag: PDRT64_RT_OCCLUDERS=0 puts no occluder instances in the structure, so
+    // this query simply finds nothing and costs one miss.
+    RayDesc occluderRay = ray;
+    occluderRay.TMax = (payload.instanceId >= 0) ? payload.t : ray.TMax;
+
+    SurfacePayload occluderPayload;
+    occluderPayload.reflection = 0.0f;
+    occluderPayload.alpha = 0.0f;
+    occluderPayload.normal = float3(0.0f, 0.0f, 0.0f);
+    occluderPayload.albedo = float3(0.0f, 0.0f, 0.0f);
+    occluderPayload.ambient = float3(0.0f, 0.0f, 0.0f);
+    occluderPayload.t = -1.0f;
+    occluderPayload.instanceId = -1;
+
+    TraceRay(SceneBVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0x10, 1, 0, 1, occluderRay, occluderPayload);
+    const bool rasterOccludes = (occluderPayload.instanceId >= 0);
+
+    // The raster path owns this pixel. Report it as a miss so that every stage downstream
+    // leaves it alone and compose returns the colour the rasteriser already put there - which
+    // is the right image for it, since that is the path that drew the surface.
+    if (rasterOccludes) {
+        payload.instanceId = -1;
+        payload.t = -1.0f;
+        payload.albedo = float3(0.0f, 0.0f, 0.0f);
+        payload.ambient = float3(0.0f, 0.0f, 0.0f);
+        payload.normal = float3(0.0f, 0.0f, 0.0f);
+        payload.alpha = 0.0f;
+        payload.reflection = 0.0f;
+    }
 
     gInstanceId[pixel] = payload.instanceId;
     gViewDirection[pixel] = float4(ray.Direction, 0.0f);

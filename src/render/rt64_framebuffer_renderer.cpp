@@ -141,6 +141,82 @@ namespace RT64 {
         return enabled;
     }
 
+    // The affine that maps a projection's own world space into a scene's: V_proj * inverse(V_scene).
+    //
+    // Both matrices are rigid - measured on a real frame, rows unit length and orthogonal - so
+    // the inverse is the transposed rotation and the negated translation carried through it,
+    // with no general inversion needed. Written out once here because the joined-view path and
+    // the occluders both need exactly this and had no business each having a copy.
+    static RenderAffineTransform joinAffine(const hlslpp::float4x4 &pv, const hlslpp::float4x4 &sv) {
+        float invRot[3][3];
+        for (int r = 0; r < 3; r++) {
+            for (int c = 0; c < 3; c++) {
+                invRot[r][c] = sv[c][r];
+            }
+        }
+
+        float invPos[3];
+        for (int c = 0; c < 3; c++) {
+            invPos[c] = -(sv[3][0] * invRot[0][c] + sv[3][1] * invRot[1][c] + sv[3][2] * invRot[2][c]);
+        }
+
+        // relative = V_proj * inverse(V_scene), in the game's row vector order.
+        float rel[4][3];
+        for (int r = 0; r < 3; r++) {
+            for (int c = 0; c < 3; c++) {
+                rel[r][c] = pv[r][0] * invRot[0][c] + pv[r][1] * invRot[1][c] + pv[r][2] * invRot[2][c];
+            }
+        }
+
+        for (int c = 0; c < 3; c++) {
+            rel[3][c] = pv[3][0] * invRot[0][c] + pv[3][1] * invRot[1][c] + pv[3][2] * invRot[2][c] + invPos[c];
+        }
+
+        // D3D12 wants object-to-world with column vectors, so the rotation is transposed on the
+        // way out and the translation becomes the last column.
+        RenderAffineTransform out;
+        for (int r = 0; r < 3; r++) {
+            for (int c = 0; c < 3; c++) {
+                out.m[r][c] = rel[c][r];
+            }
+
+            out.m[r][3] = rel[3][r];
+        }
+
+        return out;
+    }
+
+    // Raster geometry as occluders in the tracer's BVH.
+    //
+    //   0     off entirely.
+    //   1     default - only geometry drawn in the RT scene's own view space, where the
+    //         instance transform is identity and the placement is therefore exact.
+    //   all   every projection, placed with joinAffine.
+    //
+    // "all" is what fixes a wall the tracer sees through when the wall belongs to another
+    // projection, which is the case a playthrough reported on 2026-09-13. It is not the
+    // default because the join it depends on is not trusted: on level.0000 it puts the console
+    // across the doorway as a wall and costs 16.41 -> 17.36 mean error, while on the reported
+    // frames it gains +0.371 -> +0.414 edge NCC. The same transform is why
+    // PDRT64_RT_JOINVIEWS is off. Validating it fixes both at once, and until then this stays
+    // a knob rather than a decision.
+    enum class RtOccluderMode { Off, SceneSpace, All };
+    static RtOccluderMode rtOccluders() {
+        static const RtOccluderMode mode = []() {
+            const char *env = getenv("PDRT64_RT_OCCLUDERS");
+            if (env == nullptr) {
+                return RtOccluderMode::SceneSpace;
+            }
+
+            if (env[0] == '0') {
+                return RtOccluderMode::Off;
+            }
+
+            return (strcmp(env, "all") == 0) ? RtOccluderMode::All : RtOccluderMode::SceneSpace;
+        }();
+        return mode;
+    }
+
     static bool rtTraceBlended() {
         static const bool enabled = []() {
             const char *env = getenv("PDRT64_RT_TRACEBLEND");
@@ -1115,7 +1191,7 @@ namespace RT64 {
         Framebuffer &framebuffer = framebufferVector[framebufferCount - 1];
         RenderDescriptorSet *descRealDepthSet = framebuffer.descRealFbSet->get();
         RenderDescriptorSet *descriptorSets[] = { descCommonSet->get(), descTextureSet->get(), descTextureSet->get(), descRealDepthSet };
-        rtResources->updateTopLevelASResources(worker, instanceDrawCallVector, instanceTransformVector, rtScene.instanceIndices);
+        rtResources->updateTopLevelASResources(worker, instanceDrawCallVector, instanceTransformVector, rtScene.instanceIndices, rtScene.occluderIndices);
         rtResources->createShaderBindingTable(worker, rtState, descriptorSets, uint32_t(std::size(descriptorSets)), hitGroupVector);
         rtResources->updateLightsBuffer(worker, rtScene);
     }
@@ -2127,6 +2203,12 @@ namespace RT64 {
                 targetDrawCall.sceneIndices.push_back({ sceneIndex, true });
                 rtScene.instanceIndices.clear();
 
+                // The occluders go with the scene they were gathered for, and the next scene
+                // starts with none. Leaving them behind would put a room's walls in the BVH of
+                // whatever projection opened next - the weapon's, say - where they are neither
+                // in the right space nor wanted.
+                rtScene.occluderIndices.clear();
+
                 return true;
             }
             else {
@@ -2752,7 +2834,10 @@ namespace RT64 {
 
                         const bool alphaTested = (otherMode.alphaCompare() != G_AC_NONE);
                         const RenderBottomLevelASMesh asMesh(indexRes->at(call.meshDesc.faceIndicesStart *IndexStride), worldPosRes->at(0), RenderFormat::R32_UINT, RenderFormat::R32G32B32_FLOAT, call.callDesc.triangleCount * 3, vertexCount, PosStride, !alphaTested);
-                        rtResources->addBottomLevelASMesh(asMesh);
+                        // The index this call is about to be pushed at. instanceIndex itself is
+                        // not declared until after the projection switch below, and the mesh has
+                        // to be added here where the call's geometry is in scope.
+                        rtResources->addBottomLevelASMesh(asMesh, static_cast<uint32_t>(instanceDrawCallVector.size()));
 
                         // Requested for every raytraced call, where upstream leaves this behind
                         // an `if (false)` and a TODO naming a shaderDesc flag that does not exist
@@ -2886,46 +2971,7 @@ namespace RT64 {
                     // already been placed by, which put railings and stairs through walls and
                     // is what a playthrough found on 2026-09-13.
                     //
-                    // Both matrices are rigid - measured on a real frame, rows unit length and
-                    // orthogonal - so the inverse is the transposed rotation and the negated
-                    // translation through it, with no general inversion needed.
-                    const auto &pv = drawData.modViewTransforms[proj.transformsIndex];
-                    const auto &sv = rtScene.curViewMatrix;
-
-                    // inverse(V_scene): rotation transposed, translation carried through it.
-                    float invRot[3][3];
-                    for (int r = 0; r < 3; r++) {
-                        for (int c = 0; c < 3; c++) {
-                            invRot[r][c] = sv[c][r];
-                        }
-                    }
-
-                    float invPos[3];
-                    for (int c = 0; c < 3; c++) {
-                        invPos[c] = -(sv[3][0] * invRot[0][c] + sv[3][1] * invRot[1][c] + sv[3][2] * invRot[2][c]);
-                    }
-
-                    // relative = V_proj * inverse(V_scene), in the game's row vector order.
-                    float rel[4][3];
-                    for (int r = 0; r < 3; r++) {
-                        for (int c = 0; c < 3; c++) {
-                            rel[r][c] = pv[r][0] * invRot[0][c] + pv[r][1] * invRot[1][c] + pv[r][2] * invRot[2][c];
-                        }
-                    }
-
-                    for (int c = 0; c < 3; c++) {
-                        rel[3][c] = pv[3][0] * invRot[0][c] + pv[3][1] * invRot[1][c] + pv[3][2] * invRot[2][c] + invPos[c];
-                    }
-
-                    // D3D12 wants object-to-world with column vectors, so the rotation is
-                    // transposed on the way out and the translation becomes the last column.
-                    for (int r = 0; r < 3; r++) {
-                        for (int c = 0; c < 3; c++) {
-                            instanceTransform.m[r][c] = rel[c][r];
-                        }
-
-                        instanceTransform.m[r][3] = rel[3][r];
-                    }
+                    instanceTransform = joinAffine(drawData.modViewTransforms[proj.transformsIndex], rtScene.curViewMatrix);
                 }
 #           endif
 
@@ -3018,6 +3064,84 @@ namespace RT64 {
 #           endif
                 {
                     rasterScene.instanceIndices.push_back(instanceIndex);
+
+#               if RT_ENABLED
+                    // And into the scene's BVH as an occluder, if it is world geometry.
+                    //
+                    // The tracer's world was only ever the draws it took, so a primary ray
+                    // passed through everything left here and hit whatever was behind it - a
+                    // playthrough on 2026-09-13 saw guards through a grille wall that the
+                    // raster path had drawn solid. Compose cannot repair that after the fact:
+                    // the game clears depth mid frame (G_CLEAR_DEPTH_EXT at command 3331 of
+                    // 5834 on that capture), so the wall's depth is gone by the time compose
+                    // could compare against it. The BVH is the only place that still knows
+                    // where the wall is, so the wall goes in the BVH.
+                    //
+                    // Perspective and orthographic only. A rectangle projection is a screen
+                    // space quad - HUD, overlays, the pause blur - and its vertices are not in
+                    // any world the rays travel through; putting one in would hang a wall
+                    // across the camera.
+                    const bool worldGeometry = (proj.type == Projection::Type::Perspective) ||
+                                               (proj.type == Projection::Type::Orthographic);
+                    // Placed into the scene's space rather than assumed to be in it.
+                    //
+                    // The vertices these structures are built from were written in world space
+                    // by the RSP world pass, and for a projection with its own view matrix that
+                    // world is the projection's own - the room's, in Perfect Dark. Assuming
+                    // identity put level.0000's console across the doorway as a wall
+                    // (16.41 -> 17.28 mean error), and rejecting anything out of space instead
+                    // threw away the very wall this exists for, because that wall is drawn in
+                    // the room's space.
+                    //
+                    // So it is transformed, by the same join the traced path uses. An occluder
+                    // is the honest place to try that transform: it is not shaded, so a wrong
+                    // one can only put a blocker in the wrong place, which the score sees
+                    // immediately rather than hiding inside a texture.
+                    //
+                    // Against the chosen projection rather than the open scene, because the
+                    // scene takes its matrices from that projection and a call can arrive
+                    // before it has opened - which is where the wall that started this lives.
+                    const RtOccluderMode occluderMode = rtOccluders();
+                    bool occluderWanted = (occluderMode != RtOccluderMode::Off) && p.rtEnabled &&
+                                          worldGeometry && (rtProjIndex != UINT32_MAX) &&
+                                          (call.callDesc.triangleCount > 0);
+                    if (occluderWanted) {
+                        const Projection &sceneProj = fbPair.projections[rtProjIndex];
+                        const float viewDiff = matrixDifference(drawData.modViewTransforms[proj.transformsIndex],
+                            drawData.modViewTransforms[sceneProj.transformsIndex]);
+                        if (viewDiff < 1e-6f) {
+                            // Same space: identity, and exact.
+                            instanceTransform = RenderAffineTransform();
+                        }
+                        else if (occluderMode == RtOccluderMode::All) {
+                            instanceTransform = joinAffine(drawData.modViewTransforms[proj.transformsIndex],
+                                drawData.modViewTransforms[sceneProj.transformsIndex]);
+                        }
+                        else {
+                            occluderWanted = false;
+                        }
+                    }
+
+                    if (occluderWanted) {
+                        const interop::OtherMode &occluderMode = call.callDesc.otherMode;
+
+                        // Only geometry the rasteriser itself treats as solid. A draw that does
+                        // not test depth is an overlay of some kind, and a decal is coplanar
+                        // with the surface it sits on - as an occluder either one would stop
+                        // rays in front of the wall it decorates rather than at it.
+                        const bool solid = occluderMode.zCmp() &&
+                                           (occluderMode.zMode() != ZMODE_DEC) &&
+                                           !occluderMode.forceBlend();
+                        if (solid) {
+                            const bool occluderAlphaTested = (occluderMode.alphaCompare() != G_AC_NONE);
+                            const RenderBottomLevelASMesh occluderMesh(indexRes->at(call.meshDesc.faceIndicesStart * IndexStride),
+                                worldPosRes->at(0), RenderFormat::R32_UINT, RenderFormat::R32G32B32_FLOAT,
+                                call.callDesc.triangleCount * 3, vertexCount, PosStride, !occluderAlphaTested);
+                            rtResources->addBottomLevelASMesh(occluderMesh, instanceIndex);
+                            rtScene.occluderIndices.push_back(instanceIndex);
+                        }
+                    }
+#               endif
                 }
 
                 typeTally[uint32_t(instanceDrawCall.type) & 7]++;

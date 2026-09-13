@@ -317,9 +317,17 @@ namespace RT64 {
         }
 
         bottomLevelASVector.clear();
+        blasIndexByDrawCall.clear();
     }
 
-    void RaytracingResources::addBottomLevelASMesh(const RenderBottomLevelASMesh &mesh) {
+    void RaytracingResources::addBottomLevelASMesh(const RenderBottomLevelASMesh &mesh, uint32_t drawCallIndex) {
+        // Recorded here rather than counted later. See blasIndexByDrawCall.
+        if (drawCallIndex >= blasIndexByDrawCall.size()) {
+            blasIndexByDrawCall.resize(size_t(drawCallIndex) + 1, UINT32_MAX);
+        }
+
+        blasIndexByDrawCall[drawCallIndex] = uint32_t(bottomLevelASVector.size());
+
         BottomLevelAS blas;
         if (!bottomLevelASPool.empty()) {
             blas = std::move(bottomLevelASPool.back());
@@ -422,7 +430,7 @@ namespace RT64 {
 
     // Top level acceleration structure.
 
-    void RaytracingResources::updateTopLevelASResources(RenderWorker *worker, const std::vector<InstanceDrawCall> &instanceDrawCalls, const std::vector<RenderAffineTransform> &instanceTransforms, const std::vector<uint32_t> &instanceIndices) {
+    void RaytracingResources::updateTopLevelASResources(RenderWorker *worker, const std::vector<InstanceDrawCall> &instanceDrawCalls, const std::vector<RenderAffineTransform> &instanceTransforms, const std::vector<uint32_t> &instanceIndices, const std::vector<uint32_t> &occluderIndices) {
         assert(worker != nullptr);
 
         // Map each instance to its structure by counting, not by position.
@@ -437,18 +445,13 @@ namespace RT64 {
         // the debug layer cannot see - every call is valid - and the driver reports as an
         // internal error a few frames later.
         //
-        // What is reliable is the order: structures are added in the same order the draw
-        // calls are appended, and only for raytraced ones. So the structure for a draw call
-        // is the number of raytraced draw calls that precede it.
-        thread_local std::vector<uint32_t> blasIndexByDrawCall;
-        blasIndexByDrawCall.assign(instanceDrawCalls.size(), UINT32_MAX);
-
-        uint32_t raytracedSoFar = 0;
-        for (size_t i = 0; i < instanceDrawCalls.size(); i++) {
-            if (instanceDrawCalls[i].type == InstanceDrawCall::Type::Raytracing) {
-                blasIndexByDrawCall[i] = raytracedSoFar++;
-            }
-        }
+        // It used to be recovered here by counting raytraced draw calls, on the reasoning that
+        // structures are added in draw call order and only for raytraced ones. The second half
+        // of that stopped being true when occluders were added: they are raster draw calls that
+        // still get a structure, so counting raytraced calls skips them and every mapping after
+        // the first occluder is off by one. It is recorded at the point of the add instead
+        // (addBottomLevelASMesh), which cannot drift from the thing it describes.
+        const std::vector<uint32_t> &blasIndexByDrawCall = this->blasIndexByDrawCall;
 
         if (reportDeviceRemoval(worker->device, graphicsAPI, "the top level acceleration structure")) {
             return;
@@ -499,6 +502,43 @@ namespace RT64 {
             // that world is the projection's own - the room's, in Perfect Dark, which is
             // why those projections are a different space and were being refused entry
             // to the scene rather than placed in it.
+            instance.transform = (drawCallIndex < instanceTransforms.size()) ? instanceTransforms[drawCallIndex] : RenderAffineTransform();
+            topLevelASInstances.emplace_back(instance);
+        }
+
+        // The occluders: raster draw calls placed in the scene so that rays stop at them.
+        //
+        // Same geometry and same transform as any other instance; what differs is the mask,
+        // which is RasterOccluderRayQueryMask alone, and the hit group, which is the surface
+        // one so that a reflection or a bounce ray that lands here still shades something
+        // rather than reading an empty record. Primary visibility does not ask for this bit
+        // (it traces 0xE7) and asks about occlusion in a separate query, so nothing about
+        // what the tracer shades changes - only what stops a ray.
+        for (const uint32_t drawCallIndex : occluderIndices) {
+            if (drawCallIndex >= blasIndexByDrawCall.size()) {
+                continue;
+            }
+
+            const uint32_t blasIndex = blasIndexByDrawCall[drawCallIndex];
+            if (blasIndex >= bottomLevelASVector.size()) {
+                continue;
+            }
+
+            const BottomLevelAS &blas = bottomLevelASVector[blasIndex];
+            if (blas.accelerationStructure == nullptr) {
+                continue;
+            }
+
+            RenderTopLevelASInstance instance;
+            instance.bottomLevelAS = blas.buffer->at(0);
+            instance.instanceID = drawCallIndex;
+            instance.instanceMask = RasterOccluderRayQueryMask;
+            instance.instanceContributionToHitGroupIndex = 0;
+
+            // Two sided. The raster path decides facing per draw call and an occluder is only
+            // ever asked whether something is in the way, so culling one here can only open a
+            // hole in a wall that the rasteriser drew solid.
+            instance.cullDisable = true;
             instance.transform = (drawCallIndex < instanceTransforms.size()) ? instanceTransforms[drawCallIndex] : RenderAffineTransform();
             topLevelASInstances.emplace_back(instance);
         }

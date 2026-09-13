@@ -39,6 +39,11 @@ namespace RT64 {
         // Instances belonging to this scene, indices into FramebufferRenderer's draw calls.
         std::vector<uint32_t> instanceIndices;
 
+        // Draw calls the raster path owns that are put in this scene's BVH as occluders only
+        // (RasterOccluderRayQueryMask). They are not shaded by the tracer and are not drawn by
+        // it - they exist so a ray stops where the raster path put geometry.
+        std::vector<uint32_t> occluderIndices;
+
         // Rasterized views composited into the traced image. Must hold at least one element
         // by the time it is uploaded (:1807-1809).
         std::vector<interop::InterleavedRaster> interleavedRasters;
@@ -125,6 +130,16 @@ namespace RT64 {
         // resetBottomLevelAS move to the pool rather than being destroyed, which is what
         // keeps a steady stream of frames from reallocating every buffer every frame.
         std::vector<BottomLevelAS> bottomLevelASVector;
+
+        // Which structure each draw call's mesh became, recorded as it is added.
+        //
+        // updateTopLevelASResources used to recover this by counting raytraced draw calls,
+        // which held only while every structure belonged to one. Occluders break that
+        // assumption, and a structure mapped to the wrong draw call is a top level structure
+        // referencing geometry never built for it - invisible to the debug layer, because
+        // every call is valid, and reported by the driver as an internal error some frames
+        // later. Recording it costs one vector and cannot drift.
+        std::vector<uint32_t> blasIndexByDrawCall;
         std::vector<BottomLevelAS> bottomLevelASPool;
         std::unique_ptr<RenderAccelerationStructure> topLevelAS;
         std::unique_ptr<RenderBuffer> topLevelASBuffer;
@@ -271,10 +286,10 @@ namespace RT64 {
         // draw-call walk (rt64_framebuffer_renderer.cpp:1596); the update calls size and
         // create the resources; the submit calls record the builds.
         void resetBottomLevelAS();
-        void addBottomLevelASMesh(const RenderBottomLevelASMesh &mesh);
+        void addBottomLevelASMesh(const RenderBottomLevelASMesh &mesh, uint32_t drawCallIndex);
         void updateBottomLevelASResources(RenderWorker *worker);
         void submitBottomLevelASCreation(RenderWorker *worker);
-        void updateTopLevelASResources(RenderWorker *worker, const std::vector<InstanceDrawCall> &instanceDrawCalls, const std::vector<RenderAffineTransform> &instanceTransforms, const std::vector<uint32_t> &instanceIndices);
+        void updateTopLevelASResources(RenderWorker *worker, const std::vector<InstanceDrawCall> &instanceDrawCalls, const std::vector<RenderAffineTransform> &instanceTransforms, const std::vector<uint32_t> &instanceIndices, const std::vector<uint32_t> &occluderIndices);
         void submitTopLevelASCreation(RenderWorker *worker);
 
         // Shader binding table, rebuilt whenever the hit groups or descriptor sets change.
