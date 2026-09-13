@@ -51,6 +51,11 @@ namespace interop {
         float nearDist;
         float farDist;
         float giDiffuseStrength;
+        // A floor under every draw call's ExtraParams.reflectionFactor, from
+        // PDRT64_RT_REFLECT. Perfect Dark marks nothing as reflective - every call gets
+        // reflectionFactor 0 (rt64_state.cpp:1685) - so without this the reflection pass
+        // is correct and invisible, and cannot be measured or looked at.
+        float reflectionOverride;
         float giBackgroundStrength;
         float motionBlurStrength;
         float tonemapExposure;
@@ -89,6 +94,7 @@ namespace interop {
             nearDist = 1.0f;
             farDist = 1000.0f;
             giDiffuseStrength = 0.0f;
+            reflectionOverride = 0.0f;
             giBackgroundStrength = 0.0f;
             motionBlurStrength = 0.0f;
             tonemapExposure = 0.6f;

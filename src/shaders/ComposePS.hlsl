@@ -41,7 +41,7 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
     if (diffuse.a > EPSILON) {
         float3 directLight = gDirectLight.SampleLevel(gSampler, uv, 0).rgb;
         float3 indirectLight = gIndirectLight.SampleLevel(gSampler, uv, 0).rgb;
-        float3 reflection = gReflection.SampleLevel(gSampler, uv, 0).rgb;
+        const float4 reflection = gReflection.SampleLevel(gSampler, uv, 0);
         float3 refraction = gRefraction.SampleLevel(gSampler, uv, 0).rgb;
 
         // We intentionally mix the HDR buffer that will be upscaled in sRGB space to preserve the color of effects like fog and such.
@@ -54,7 +54,10 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         // had. gBackgroundColor two branches down was already exempted for the same
         // reason, on the same reasoning, for the raster half of the image.
         float3 result = lerp(diffuse.rgb, diffuse.rgb * (directLight + indirectLight), diffuse.a);
-        result += reflection;
+        // Blended over by its own strength, not added: a mirror replaces what is under it
+        // in proportion to how much of a mirror it is, and adding would leave the diffuse
+        // surface at full brightness with the reflection on top of it.
+        result = result * (1.0f - reflection.a) + reflection.rgb;
         result += refraction;
 
         // Blended over, not added. RefractionRayGen writes the nearest blended surface

@@ -32,6 +32,10 @@
 static const float ShadowRayBias = 0.5f;
 
 struct SurfacePayload {
+    // How much of this surface is a mirror, from its own ExtraParams with the global
+    // override applied. Read by ReflectionRayGen through the G-buffer, not from here.
+    float reflection;
+
     // The combiner's alpha for the surface, which is what a blended draw is blended by.
     // Only the transparent pass reads it; primary visibility skips blended surfaces.
     float alpha;
@@ -87,6 +91,7 @@ void PrimaryRayGen() {
     payload.albedo = float3(0.0f, 0.0f, 0.0f);
     payload.ambient = float3(0.0f, 0.0f, 0.0f);
     payload.alpha = 0.0f;
+    payload.reflection = 0.0f;
     payload.t = -1.0f;
     payload.instanceId = -1;
 
@@ -183,10 +188,12 @@ void PrimaryRayGen() {
         layerInFront = (layerZ < tracedLayerZ);
     }
 
-    // Cleared rather than left stale: compose reads all of these unconditionally
-    // (shaders/ComposePS.hlsl:19-25), so whatever the shading passes have not written yet
-    // must read as nothing rather than as last frame's contents.
-    gShadingSpecular[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    // The alpha carries how reflective the surface is, for ReflectionRayGen to read: it
+    // runs from the G-buffer and has no hit of its own to ask. The rgb stay cleared -
+    // compose reads all of these unconditionally (shaders/ComposePS.hlsl:19-25), so
+    // whatever the shading passes have not written must read as nothing rather than as
+    // last frame's contents.
+    gShadingSpecular[pixel] = float4(0.0f, 0.0f, 0.0f, (payload.instanceId >= 0) ? payload.reflection : 0.0f);
 
     // The surface without its baked lighting. The compose pass multiplies this by the light
     // buffers (ComposePS.hlsl:28), so anything left in here that is really light would be
@@ -396,10 +403,62 @@ void IndirectRayGen() {
     gIndirectLightAccum[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 }
 
+// One mirror bounce off the surfaces that ask for one.
+//
+// Runs entirely from what PrimaryRayGen left in the G-buffer - position, normal, view
+// direction, and the reflection strength in gShadingSpecular's alpha - so it costs one ray per
+// reflective pixel and nothing at all where nothing reflects.
+//
+// The hit is reconstructed the way primary visibility reconstructs one: albedo times the shade
+// the game baked into its vertex colours. A reflection of a lit room should look like the room,
+// and the direct pass does not run for it, so the baked shade is the only light it can carry.
 [shader("raygeneration")]
 void ReflectionRayGen() {
     const uint2 pixel = DispatchRaysIndex().xy;
     gReflection[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    const float reflectionFactor = gShadingSpecular[pixel].a;
+    if (reflectionFactor <= 0.0f) {
+        return;
+    }
+
+    const float4 shadingPosition = gShadingPosition[pixel];
+    if (shadingPosition.w <= 0.0f) {
+        return;
+    }
+
+    const float3 surfaceNormal = gShadingNormal[pixel].xyz;
+    const float3 viewDirection = gViewDirection[pixel].xyz;
+
+    RayDesc ray;
+    ray.Origin = shadingPosition.xyz + surfaceNormal * ShadowRayBias;
+    ray.Direction = reflect(viewDirection, surfaceNormal);
+    ray.TMin = 0.0f;
+    ray.TMax = RtParams.farDist;
+
+    SurfacePayload payload;
+    payload.normal = float3(0.0f, 0.0f, 0.0f);
+    payload.albedo = float3(0.0f, 0.0f, 0.0f);
+    payload.ambient = float3(0.0f, 0.0f, 0.0f);
+    payload.alpha = 0.0f;
+    payload.reflection = 0.0f;
+    payload.t = -1.0f;
+    payload.instanceId = -1;
+
+    // 0xF7 is every depth mask and not the blended bit, the same set primary visibility
+    // traces: a reflection of a blended surface would be drawn solid, which is the reason
+    // primary visibility skips them too.
+    TraceRay(SceneBVH, RAY_FLAG_NONE, 0xF7, 0, 0, 0, ray, payload);
+    if (payload.instanceId < 0) {
+        // A reflection of nothing is nothing. It is not the background: the raster background
+        // is a screen space image and has no meaning along a reflected ray.
+        return;
+    }
+
+    // Premultiplied, with the strength in alpha, so compose can blend rather than add - adding
+    // would keep the whole diffuse surface underneath at full brightness and put the mirror on
+    // top of it, which is brighter than either.
+    gReflection[pixel] = float4(payload.albedo * payload.ambient * reflectionFactor, reflectionFactor);
 }
 
 // The blended surfaces, which primary visibility deliberately does not see.
@@ -430,6 +489,7 @@ void RefractionRayGen() {
     payload.albedo = float3(0.0f, 0.0f, 0.0f);
     payload.ambient = float3(0.0f, 0.0f, 0.0f);
     payload.alpha = 0.0f;
+    payload.reflection = 0.0f;
     payload.t = -1.0f;
     payload.instanceId = -1;
 
@@ -671,6 +731,12 @@ void SurfaceClosestHit(inout SurfacePayload payload, in TriangleAttributes attri
     payload.albedo = shading.albedo;
     payload.ambient = shading.ambient;
     payload.alpha = shading.alpha;
+
+    // instanceExtraParams is bound for every RT dispatch and, until now, read by no
+    // shader at all. reflectionFactor is per draw call and is 0 for every call this
+    // game makes (rt64_state.cpp:1685), so the override is what gives it a value here.
+    const ExtraParams extraParams = instanceExtraParams[renderIndices.instanceIndex];
+    payload.reflection = saturate(max(extraParams.reflectionFactor, RtParams.reflectionOverride));
 }
 
 // Alpha compare, as a hit that never happened.

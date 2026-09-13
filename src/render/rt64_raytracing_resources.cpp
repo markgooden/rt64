@@ -1018,6 +1018,16 @@ namespace RT64 {
         rtParams.diSamples = uint32_t(std::max(rtConfig.diSamples, 0));
         rtParams.giSamples = uint32_t(std::max(rtConfig.giSamples, 0));
         rtParams.maxLights = uint32_t(std::max(rtConfig.maxLights, 0));
+        // PDRT64_RT_REFLECT: a floor under every draw call's own reflectionFactor. Read
+        // once; this runs whenever the configuration changes rather than per frame.
+        {
+            static const float overrideValue = []() {
+                const char *env = getenv("PDRT64_RT_REFLECT");
+                return (env != nullptr) ? float(atof(env)) : 0.0f;
+            }();
+            rtParams.reflectionOverride = std::clamp(overrideValue, 0.0f, 1.0f);
+        }
+
         rtParams.motionBlurStrength = rtConfig.motionBlurStrength;
         rtParams.motionBlurSamples = uint32_t(std::max(rtConfig.motionBlurSamples, 0));
         rtParams.visualizationMode = rtConfig.visualizationMode;

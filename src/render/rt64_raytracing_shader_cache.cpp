@@ -151,11 +151,20 @@ namespace RT64 {
         pipelineDesc.hitGroupsCount = uint32_t(std::size(hitGroups));
         pipelineDesc.pipelineLayout = pipelineLayout.get();
 
-        // float3 normal, float t, int instanceId.
-        // normal, albedo, ambient, t and instance id. Six floats fitted the placeholder
-        // payload that carried no surface colour, eight fitted one that had not yet split
-        // the baked lighting out of the albedo, and this carries both halves.
-        pipelineDesc.maxPayloadSize = 12 * sizeof(float);
+        // SurfacePayload, field for field (shaders/RaytracingLib.hlsl): float3 normal,
+        // float3 albedo, float3 ambient, float alpha, float reflection, float t, int
+        // instanceId. Thirteen floats.
+        //
+        // It has grown three times: six floats carried no surface colour, eight had not
+        // split the baked lighting out of the albedo, twelve carried both halves, and the
+        // transparent and reflection passes each needed one more.
+        //
+        // Getting this wrong does not fail where the payload is declared. The pipeline
+        // state object fails to create with E_INVALIDARG, plume prints
+        // "CreateStateObject failed with error code 0x80070057", and the frame simply
+        // traces nothing - which reads as the tracer being switched off rather than as a
+        // payload one float too large.
+        pipelineDesc.maxPayloadSize = 13 * sizeof(float);
 
         // Primary visibility only, so no ray is cast from inside a hit shader yet.
         pipelineDesc.maxRecursionDepth = 1;
