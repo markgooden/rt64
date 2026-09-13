@@ -716,18 +716,48 @@ void SurfaceClosestHit(inout SurfacePayload payload, in TriangleAttributes attri
     uint i0, i1, i2;
     const RenderIndices renderIndices = fetchTriangle(i0, i1, i2);
 
-    // posBuffer is the world space position the RSP world compute pass writes, four floats
-    // per vertex, so the normal comes out in world space with no further transform.
+    const float3 barycentrics = barycentricsOf(attributes);
+
+    // posBuffer is the position the RSP world compute pass writes, four floats per vertex.
     const float3 p0 = asfloat(posBuffer.Load3(i0 * 16));
     const float3 p1 = asfloat(posBuffer.Load3(i1 * 16));
     const float3 p2 = asfloat(posBuffer.Load3(i2 * 16));
     const float3 geometricNormal = normalize(cross(p1 - p0, p2 - p0));
 
-    // Turned to face the ray. The N64 draws plenty of geometry double sided and the winding
-    // of a back face would otherwise light it from behind.
-    payload.normal = (dot(geometricNormal, WorldRayDirection()) > 0.0f) ? -geometricNormal : geometricNormal;
+    // The per-vertex normal, interpolated, in preference to the triangle's own.
+    //
+    // normBuffer is the same compute pass's output, same stride, written from the vertex
+    // normals through the inverse transpose world matrix (shaders/RSPWorldCS.hlsl:39) - and
+    // read by nothing until now. A geometric normal makes every surface flat at the level of
+    // its polygons, which is invisible on diffuse albedo and unmistakable the moment a mirror
+    // reflects it.
+    //
+    // The pass writes (0,0,0,1) for a vertex whose source normal is zero, which is what a
+    // game that puts colour in that field rather than a normal produces, so a degenerate
+    // interpolation falls back to the triangle rather than to nothing.
+    const float3 n0 = asfloat(normBuffer.Load3(i0 * 16));
+    const float3 n1 = asfloat(normBuffer.Load3(i1 * 16));
+    const float3 n2 = asfloat(normBuffer.Load3(i2 * 16));
+    const float3 interpolatedNormal = n0 * barycentrics.x + n1 * barycentrics.y + n2 * barycentrics.z;
+    const bool hasVertexNormals = (dot(interpolatedNormal, interpolatedNormal) > 1e-6f);
+    float3 shadingNormal = hasVertexNormals ? normalize(interpolatedNormal) : geometricNormal;
 
-    const SurfaceShading shading = shadeSurface(renderIndices, i0, i1, i2, barycentricsOf(attributes));
+    // Into the space the rays are in. Both buffers hold positions and normals in the space
+    // the draw call was submitted in, and a draw call whose projection carried its own view
+    // matrix is placed in the scene by its instance transform - so for those, object space is
+    // not the scene's space. The rotation part is enough: these transforms are rigid.
+    const float3x4 objectToWorld = ObjectToWorld3x4();
+    const float3x3 normalTransform = float3x3(objectToWorld[0].xyz, objectToWorld[1].xyz, objectToWorld[2].xyz);
+    const float3 worldGeometric = normalize(mul(normalTransform, geometricNormal));
+    shadingNormal = normalize(mul(normalTransform, shadingNormal));
+
+    // Turned to face the ray. The N64 draws plenty of geometry double sided and the winding
+    // of a back face would otherwise light it from behind. The geometric normal decides which
+    // way that is, because a vertex normal on a double sided surface faces whichever way the
+    // artist meant and the ray does not care.
+    payload.normal = (dot(worldGeometric, WorldRayDirection()) > 0.0f) ? -shadingNormal : shadingNormal;
+
+    const SurfaceShading shading = shadeSurface(renderIndices, i0, i1, i2, barycentrics);
     payload.albedo = shading.albedo;
     payload.ambient = shading.ambient;
     payload.alpha = shading.alpha;
