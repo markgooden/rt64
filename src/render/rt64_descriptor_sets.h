@@ -476,6 +476,7 @@ namespace RT64 {
         uint32_t gTransparent;
         uint32_t gBakedLight;
         uint32_t gBackgroundColor;
+        uint32_t gBackgroundDepth;
 
         RaytracingComposeDescriptorSet(const SamplerLibrary &samplerLibrary, RenderDevice *device = nullptr) {
             builder.begin();
@@ -498,6 +499,12 @@ namespace RT64 {
             // the bake is per vertex and smooth, and running it through a denoiser would
             // soften the game's own lighting for no reason.
             gBakedLight = builder.addTexture(9);
+
+            // The depth the raster path left behind the background colour. Without it
+            // compose has no way to order a traced surface against a rastered one, and
+            // every traced pixel wins - which draws railings through floors as soon as
+            // the floor is one of the draws the tracer did not take.
+            gBackgroundDepth = builder.addTexture(10);
 
             // Immutable samplers go last. They become static samplers in the root signature and
             // are left out of the view table, but the descriptor set still spends a view heap

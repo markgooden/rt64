@@ -1099,7 +1099,7 @@ namespace RT64 {
         rtResources->updateLightsBuffer(worker, rtScene);
     }
 
-    void FramebufferRenderer::submitRaytracingScene(RenderWorker *worker, RenderTarget *colorTarget, const RaytracingScene &rtScene) {
+    void FramebufferRenderer::submitRaytracingScene(RenderWorker *worker, RenderTarget *colorTarget, RenderTarget *depthTarget, const RaytracingScene &rtScene) {
         // The acceleration structure, the binding table and the output buffers are built
         // once per frame, for the one scene endFramebuffers picks (:1786-1800, and the FIXME
         // above it). This is called for every framebuffer that produced a scene, so a frame
@@ -1447,6 +1447,14 @@ namespace RT64 {
         const bool backgroundIsTarget = (backgroundTexture == colorTarget->texture.get());
         rtResources->composeSet->setTexture(rtResources->composeSet->gBackgroundColor, backgroundTexture,
             RenderTextureLayout::SHADER_READ, colorTarget->getResolvedTextureView());
+
+        // And the depth that background was drawn with, so compose can order a traced surface
+        // against a rastered one. Same target the raster draws used, read here for one draw
+        // that does not write to it - the same argument gBackgroundColor above rests on.
+        if (depthTarget != nullptr) {
+            rtResources->composeSet->setTexture(rtResources->composeSet->gBackgroundDepth, depthTarget->texture.get(),
+                RenderTextureLayout::DEPTH_READ, depthTarget->textureView.get());
+        }
 
         thread_local std::vector<RenderTextureBarrier> afterDispatchBarriers;
         afterDispatchBarriers.clear();
@@ -1880,7 +1888,7 @@ namespace RT64 {
                 }
 
                 submitDepthAccess(worker, targetDrawCall.fbStorage, true, depthState);
-                submitRaytracingScene(worker, targetDrawCall.fbStorage->colorTarget, rtScene);
+                submitRaytracingScene(worker, targetDrawCall.fbStorage->colorTarget, targetDrawCall.fbStorage->depthTarget, rtScene);
             }
             else
 #       endif
@@ -2352,6 +2360,70 @@ namespace RT64 {
                 }
                 else {
 #               if RT_ENABLED
+                    // PDRT64_RT_CHECKWORLD: does a traced call's world position agree with where
+                    // the game actually draws it?
+                    //
+                    // The raster path never reads a world matrix - it draws from screenPos,
+                    // which the RSP pass computes with the combined modelViewProj. The tracer
+                    // reads worldPos, which comes from the *split* of that matrix into world and
+                    // view. So a decomposition that is wrong for this game breaks the traced
+                    // image and leaves the raster one perfect, and nothing else in the renderer
+                    // would ever notice.
+                    //
+                    // This reconstructs the screen position the tracer's world matrix implies -
+                    // world position through the scene's own viewProj - and compares it with the
+                    // screen position the game computed. They should be the same point.
+                    if (getenv("PDRT64_RT_CHECKWORLD") != nullptr) {
+                        static uint32_t worldChecks = 0;
+                        static uint32_t worldBad = 0;
+                        if (worldChecks < 4096) {
+                            const auto &faceIndices = drawData.faceIndices;
+                            const uint32_t idx = call.meshDesc.faceIndicesStart;
+                            if (idx < faceIndices.size()) {
+                                const uint32_t v = faceIndices[idx];
+                                if ((v < drawData.worldIndices.size()) && ((v * 3 + 2) < drawData.posFloats.size()) && (v < drawData.posScreen.size())) {
+                                    const auto &world = drawData.worldTransforms[drawData.worldIndices[v]];
+                                    const float px = drawData.posFloats[v * 3 + 0];
+                                    const float py = drawData.posFloats[v * 3 + 1];
+                                    const float pz = drawData.posFloats[v * 3 + 2];
+                                    float wp[4];
+                                    for (int c = 0; c < 4; c++) {
+                                        wp[c] = px * world[0][c] + py * world[1][c] + pz * world[2][c] + world[3][c];
+                                    }
+
+                                    const auto &vp = rtScene.curViewProjMatrix;
+                                    float clip[4];
+                                    for (int c = 0; c < 4; c++) {
+                                        clip[c] = wp[0] * vp[0][c] + wp[1] * vp[1][c] + wp[2] * vp[2][c] + wp[3] * vp[3][c];
+                                    }
+
+                                    if (fabsf(clip[3]) > 1e-4f) {
+                                        const float rx = clip[0] / clip[3];
+                                        const float ry = clip[1] / clip[3];
+                                        const auto &screen = drawData.posScreen[v];
+                                        const float dx = rx - screen[0];
+                                        const float dy = ry - screen[1];
+                                        const float err = sqrtf(dx * dx + dy * dy);
+                                        worldChecks++;
+                                        if (err > 0.05f) {
+                                            worldBad++;
+                                            if (worldBad < 12) {
+                                                fprintf(stderr, "rt64: CHECKWORLD call %u: reconstructed %.3f %.3f, game %.3f %.3f, error %.3f\n",
+                                                    call.callDesc.callIndex, rx, ry, screen[0], screen[1], err);
+                                                fflush(stderr);
+                                            }
+                                        }
+
+                                        if ((worldChecks % 512) == 0) {
+                                            fprintf(stderr, "rt64: CHECKWORLD %u calls checked, %u disagree with the game\n", worldChecks, worldBad);
+                                            fflush(stderr);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // PDRT64_RT_DUMPSHADE: the baked vertex shade of every draw call, as CSV.
                     //
                     // Perfect Dark paints its lighting into vertex colours, so this is an

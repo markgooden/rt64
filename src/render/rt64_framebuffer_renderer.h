@@ -201,7 +201,7 @@ namespace RT64 {
         void resetRaytracing(RaytracingShaderCache *rtShaderCache, const RenderTexture *blueNoiseTexture);
         void updateRaytracingScene(RenderWorker *worker, const RaytracingScene &rtScene);
         void updateRaytracingResources(RenderWorker *worker, const RaytracingScene &rtScene);
-        void submitRaytracingScene(RenderWorker *worker, RenderTarget *colorTarget, const RaytracingScene &rtScene);
+        void submitRaytracingScene(RenderWorker *worker, RenderTarget *colorTarget, RenderTarget *depthTarget, const RaytracingScene &rtScene);
         void setRaytracingConfig(const RaytracingConfiguration &rtConfig, bool resolutionChanged);
 #   endif
     };

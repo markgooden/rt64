@@ -220,7 +220,12 @@ void PrimaryRayGen() {
     // is per-vertex and smooth and filtering it would soften the game's own lighting for no
     // reason. Compose adds them back together, so the image is unchanged until something
     // actually filters one of them.
-    gBakedLight[pixel] = float4(payload.ambient * RtParams.bakedLightScale, 1.0f);
+    // The alpha carries the traced surface's own depth, in the 0..1 the raster path's
+    // depth buffer holds. Compose has no constant buffer and so cannot derive it, and
+    // without it a traced pixel wins over the raster background unconditionally - which
+    // draws railings through floors as soon as the floor is a draw the tracer did not
+    // take. This buffer is written here and read there already, so it costs no binding.
+    gBakedLight[pixel] = float4(payload.ambient * RtParams.bakedLightScale, tracedLayerZ);
     gDirectLightAccum[pixel] = float4(0.0f, 0.0f, 0.0f, 1.0f);
     gFlow[pixel] = float2(0.0f, 0.0f);
     gReactiveMask[pixel] = 0.0f;
