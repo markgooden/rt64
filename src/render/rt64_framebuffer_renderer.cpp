@@ -108,6 +108,16 @@ namespace RT64 {
     //
     // PDRT64_RT_JOINVIEWS=0 turns it off, because a wrong transform loses the geometry rather
     // than misplacing a highlight, and a scene that behaves differently needs a way back.
+    // PDRT64_RT_SMOOTHNORMALS=0 turns off the welded smooth normals and leaves the hit shader
+    // with the triangle's own, which is what every surface in the game had until 2026-09-13.
+    static bool rtSmoothNormals() {
+        static const bool enabled = []() {
+            const char *env = getenv("PDRT64_RT_SMOOTHNORMALS");
+            return (env == nullptr) || (env[0] != '0');
+        }();
+        return enabled;
+    }
+
     static bool rtJoinViews() {
         static const bool enabled = []() {
             const char *env = getenv("PDRT64_RT_JOINVIEWS");
@@ -1876,6 +1886,28 @@ namespace RT64 {
         const uint32_t TcStride = sizeof(float) * 2;
         const uint32_t IndexStride = sizeof(uint32_t);
         const uint32_t vertexCount = drawData.vertexCount();
+
+        // PDRT64_RT_CHECKAS: how many vertices carry a normal rather than a colour.
+        //
+        // The same four bytes are one or the other (rt64_rsp.cpp:749-752), and
+        // RSPProcessCS decides per vertex on lightCount (RSPProcessCS.hlsl:97-98).
+        // RSPWorldCS writes dstNorm from those bytes unconditionally, so normBuffer holds
+        // a real normal only where lightCount is non-zero and a normalised colour
+        // everywhere else.
+        if (getenv("PDRT64_RT_CHECKAS") != nullptr) {
+            static uint32_t normLogs = 0;
+            if (normLogs++ < 2) {
+                uint32_t lit = 0;
+                for (uint8_t count : drawData.lightCounts) {
+                    lit += (count > 0) ? 1 : 0;
+                }
+
+                fprintf(stderr, "rt64: NORMALS %u of %zu vertices carry a normal (%.1f%%), the rest carry colour\n",
+                    lit, drawData.lightCounts.size(),
+                    drawData.lightCounts.empty() ? 0.0 : (100.0 * double(lit) / double(drawData.lightCounts.size())));
+                fflush(stderr);
+            }
+        }
         const uint32_t indexCount = uint32_t(drawData.faceIndices.size());
         const uint32_t rawTriVertexCount = drawData.rawTriVertexCount();
         vertexInputSlots[0] = RenderInputSlot(0, PosStride);
@@ -2369,7 +2401,23 @@ namespace RT64 {
                         const RenderBottomLevelASMesh asMesh(indexRes->at(call.meshDesc.faceIndicesStart *IndexStride), worldPosRes->at(0), RenderFormat::R32_UINT, RenderFormat::R32G32B32_FLOAT, call.callDesc.triangleCount * 3, vertexCount, PosStride, !alphaTested);
                         rtResources->addBottomLevelASMesh(asMesh);
 
-                        if (false) { // TODO: call.shaderDesc.flags.smoothNormal
+                        // Requested for every raytraced call, where upstream leaves this behind
+                        // an `if (false)` and a TODO naming a shaderDesc flag that does not exist
+                        // anywhere in the tree.
+                        //
+                        // The tracer needs a real normal and the buffer does not otherwise hold
+                        // one. normBuffer is written by RSPWorldCS from the vertex's four
+                        // normal-or-colour bytes, unconditionally - but those bytes are a normal
+                        // only when the vertex is lit, which RSPProcessCS decides on lightCount
+                        // (RSPProcessCS.hlsl:97). Measured on level.0000: **32 of 5878 vertices**
+                        // carry a normal. For the other 99.5% the buffer holds a normalised
+                        // vertex colour, which varies smoothly and correlates loosely with
+                        // orientation - close enough to look like an improvement and wrong.
+                        //
+                        // RSPSmoothNormalCS computes the real thing by welding vertices of equal
+                        // position and colour and averaging their face normals, which is exactly
+                        // what a geometric normal is missing.
+                        if (rtSmoothNormals()) {
                             RSPSmoothNormalGenerationCB rspSmoothNormal;
                             rspSmoothNormal.indexStart = call.meshDesc.faceIndicesStart;
                             rspSmoothNormal.indexCount = call.callDesc.triangleCount * 3;
