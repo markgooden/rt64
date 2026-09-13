@@ -1038,6 +1038,34 @@ namespace RT64 {
             rtParams.bakedLightScale = std::clamp(bakedScale, 0.0f, 4.0f);
         }
 
+        // PDRT64_RT_EMIT=<threshold>,<scale> and PDRT64_RT_GI=<scale>. Both default to
+        // off, so a build with neither set renders what it rendered before.
+        {
+            struct EmissiveSettings {
+                float threshold = 0.75f;
+                float scale = 0.0f;
+            };
+
+            static const EmissiveSettings emissive = []() {
+                EmissiveSettings settings;
+                const char *env = getenv("PDRT64_RT_EMIT");
+                if (env != nullptr) {
+                    sscanf(env, "%f,%f", &settings.threshold, &settings.scale);
+                }
+
+                return settings;
+            }();
+
+            static const float giScale = []() {
+                const char *env = getenv("PDRT64_RT_GI");
+                return (env != nullptr) ? float(atof(env)) : 0.0f;
+            }();
+
+            rtParams.emissiveThreshold = std::clamp(emissive.threshold, 0.0f, 1.0f);
+            rtParams.emissiveScale = std::clamp(emissive.scale, 0.0f, 64.0f);
+            rtParams.indirectScale = std::clamp(giScale, 0.0f, 8.0f);
+        }
+
         rtParams.motionBlurStrength = rtConfig.motionBlurStrength;
         rtParams.motionBlurSamples = uint32_t(std::max(rtConfig.motionBlurSamples, 0));
         rtParams.visualizationMode = rtConfig.visualizationMode;

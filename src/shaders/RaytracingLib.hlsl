@@ -397,10 +397,91 @@ void DirectRayGen() {
     gDirectLightAccum[pixel] = float4(accumulated, 1.0f);
 }
 
+// What a surface emits, decided from its own albedo.
+//
+// This game marks nothing as a light source: ExtraParams.selfLight is 0 everywhere, and the
+// obvious bootstrap - mine the baked vertex shade, since the artists painted an irradiance map
+// - was measured on 2026-09-13 and does not work. Two thirds of the level's geometry has most
+// of its vertices pegged at maximum shade, because vertex colour is a multiplier on the
+// texture and white means "not darkened". The maxima are everything the artists left alone.
+//
+// The albedo can tell them apart, because a light panel in Perfect Dark is a bright *texture*.
+// This is a heuristic and it is deliberately a shallow one: two knobs, no material table, and
+// scale 0 by default so it changes nothing until asked.
+static float3 surfaceEmission(float3 albedo) {
+    if (RtParams.emissiveScale <= 0.0f) {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+
+    const float luma = dot(albedo, float3(0.299f, 0.587f, 0.114f));
+    const float over = saturate((luma - RtParams.emissiveThreshold) / max(1e-4f, 1.0f - RtParams.emissiveThreshold));
+    return albedo * over * RtParams.emissiveScale;
+}
+
+// One diffuse bounce.
+//
+// Until this existed, emission had nowhere to go: a surface marked as a light would look no
+// different, because what makes a light a light is that *other* surfaces see it. This gathers
+// what the surrounding geometry is sending to this pixel - its own outgoing light, which is
+// the same reconstruction compose performs for a primary hit: albedo times the baked shade,
+// plus whatever the albedo says it emits.
+//
+// One bounce, giSamples rays, cosine weighted. No second bounce: maxRecursionDepth is 1, and a
+// hit shader that traced its own ray would need it raised.
 [shader("raygeneration")]
 void IndirectRayGen() {
     const uint2 pixel = DispatchRaysIndex().xy;
     gIndirectLightAccum[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    if (RtParams.indirectScale <= 0.0f) {
+        return;
+    }
+
+    const int instanceId = gInstanceId[pixel];
+    if (instanceId < 0) {
+        return;
+    }
+
+    const float4 shadingPosition = gShadingPosition[pixel];
+    if (shadingPosition.w <= 0.0f) {
+        return;
+    }
+
+    const float3 surfaceNormal = gShadingNormal[pixel].xyz;
+    const uint sampleCount = max(RtParams.giSamples, 1u);
+
+    float3 gathered = float3(0.0f, 0.0f, 0.0f);
+    for (uint s = 0; s < sampleCount; s++) {
+        // Seeded by the sample index rather than the frame, for the reason the shadow samples
+        // are: nothing accumulates temporal noise while the filter stage is a stub.
+        const float3 direction = getCosHemisphereSampleBlueNoise(gBlueNoise, pixel, s, surfaceNormal);
+
+        RayDesc ray;
+        ray.Origin = shadingPosition.xyz + surfaceNormal * ShadowRayBias;
+        ray.Direction = direction;
+        ray.TMin = 0.0f;
+        ray.TMax = RtParams.farDist;
+
+        SurfacePayload payload;
+        payload.normal = float3(0.0f, 0.0f, 0.0f);
+        payload.albedo = float3(0.0f, 0.0f, 0.0f);
+        payload.ambient = float3(0.0f, 0.0f, 0.0f);
+        payload.alpha = 0.0f;
+        payload.reflection = 0.0f;
+        payload.t = -1.0f;
+        payload.instanceId = -1;
+
+        TraceRay(SceneBVH, RAY_FLAG_NONE, 0xF7, 0, 0, 0, ray, payload);
+        if (payload.instanceId < 0) {
+            continue;
+        }
+
+        // The light leaving that surface. The cosine weight is already in the sample
+        // distribution, so this is a plain average.
+        gathered += payload.albedo * (payload.ambient * RtParams.bakedLightScale) + surfaceEmission(payload.albedo);
+    }
+
+    gIndirectLightAccum[pixel] = float4(gathered * (RtParams.indirectScale / float(sampleCount)), 1.0f);
 }
 
 // One mirror bounce off the surfaces that ask for one.

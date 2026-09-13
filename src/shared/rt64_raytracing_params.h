@@ -62,6 +62,18 @@ namespace interop {
         // can find. The split between albedo and this term exists precisely so the
         // question can be asked.
         float bakedLightScale;
+
+        // Emissive surfaces, derived from the albedo rather than from a material table.
+        // A light panel in this game is a bright texture; its vertex colour is pegged at
+        // white like most of the level (measured 2026-09-13), so the shade cannot tell
+        // them apart and the albedo can. Threshold is where a surface starts emitting,
+        // scale is how much. Scale 0 - the default - is no emission at all.
+        float emissiveThreshold;
+        float emissiveScale;
+
+        // How much of the gathered bounce reaches the frame. 0 is no indirect light,
+        // which is what every frame before 2026-09-13 had.
+        float indirectScale;
         float giBackgroundStrength;
         float motionBlurStrength;
         float tonemapExposure;
@@ -102,6 +114,9 @@ namespace interop {
             giDiffuseStrength = 0.0f;
             reflectionOverride = 0.0f;
             bakedLightScale = 1.0f;
+            emissiveThreshold = 0.75f;
+            emissiveScale = 0.0f;
+            indirectScale = 0.0f;
             giBackgroundStrength = 0.0f;
             motionBlurStrength = 0.0f;
             tonemapExposure = 0.6f;
