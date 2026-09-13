@@ -23,6 +23,10 @@ Texture2D<float4> gTransparent : register(t7);
 // here is reading a different resource.
 Texture2D<float4> gBackgroundColor : register(t8);
 
+// The game's baked vertex shade, on its own and unfiltered. Primary visibility writes it
+// apart from the traced light so a denoiser can smooth one without smearing the other.
+Texture2D<float4> gBakedLight : register(t9);
+
 float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
     float4 diffuse = gDiffuse.SampleLevel(gSampler, uv, 0);
 
@@ -39,8 +43,11 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
     const float4 transparent = gTransparent.SampleLevel(gSampler, uv, 0);
 
     if (diffuse.a > EPSILON) {
-        float3 directLight = gDirectLight.SampleLevel(gSampler, uv, 0).rgb;
-        float3 indirectLight = gIndirectLight.SampleLevel(gSampler, uv, 0).rgb;
+        // Traced light plus the baked shade. They were one buffer until 2026-09-13, and
+        // the sum is identical - only what may be filtered has changed.
+        const float3 directLight = gDirectLight.SampleLevel(gSampler, uv, 0).rgb +
+            gBakedLight.SampleLevel(gSampler, uv, 0).rgb;
+        const float3 indirectLight = gIndirectLight.SampleLevel(gSampler, uv, 0).rgb;
         const float4 reflection = gReflection.SampleLevel(gSampler, uv, 0);
         float3 refraction = gRefraction.SampleLevel(gSampler, uv, 0).rgb;
 

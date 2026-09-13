@@ -55,5 +55,9 @@ RWTexture2D<float4> gFilteredDirectLight : register(u65, space0);
 RWTexture2D<float4> gFilteredIndirectLight : register(u66, space0);
 Texture2D<float4> gBlueNoise : register(t67, space0);
 
+// The game's baked vertex shade, written by primary visibility and added by compose
+// without ever being filtered.
+RWTexture2D<float4> gBakedLight : register(u68, space0);
+
 // Set 3 - Framebuffer.
 Texture2D<float4> gBackgroundColor : register(t1, space3);

@@ -128,7 +128,7 @@ namespace RT64 {
 #endif
 
     // Helper functions.
-    
+
     RenderRect convertFixedRect(FixedRect rect, hlslpp::float2 resScale, int32_t fbWidth, float aspectRatioScale, float extOriginPercentage, int32_t horizontalMisalignment, uint16_t leftOrigin, uint16_t rightOrigin) {
         if (!rect.isNull()) {
             auto computeOrigin = [=](uint16_t origin) {
@@ -161,7 +161,7 @@ namespace RT64 {
             return RenderRect(0, 0, 0, 0);
         }
     }
-    
+
     RenderViewport convertViewportRect(FixedRect rect, hlslpp::float2 resScale, int32_t fbWidth, float aspectRatioScale, float extOriginPercentage, float horizontalMisalignment, uint16_t leftOrigin, uint16_t rightOrigin) {
         auto computeOrigin = [=](uint16_t origin) {
             if (origin < G_EX_ORIGIN_NONE) {
@@ -171,7 +171,7 @@ namespace RT64 {
                 return float(fbWidth) / 2;
             }
         };
-        
+
         auto correctMisalignment = [=](float coord, uint16_t origin) {
             if (origin < G_EX_ORIGIN_NONE) {
                 return (coord - std::fmod(coord, resScale[1])) - horizontalMisalignment;
@@ -180,7 +180,7 @@ namespace RT64 {
                 return coord;
             }
         };
-        
+
         float left = std::round((computeOrigin(leftOrigin) + (rect.left(true) - computeOrigin(leftOrigin)) * aspectRatioScale) * resScale.x);
         float right = std::round((computeOrigin(rightOrigin) + (rect.right(true) - computeOrigin(rightOrigin)) * aspectRatioScale) * resScale.x);
         float top = std::round(rect.top(true) * resScale.y);
@@ -234,7 +234,7 @@ namespace RT64 {
     RasterScene::RasterScene() { }
 
     // FramebufferRenderer
-    
+
     FramebufferRenderer::FramebufferRenderer(RenderWorker *worker, bool rtSupport, UserConfiguration::GraphicsAPI graphicsAPI, const ShaderLibrary *shaderLibrary) {
         assert(worker != nullptr);
 
@@ -261,7 +261,7 @@ namespace RT64 {
         dummyColorTarget.reset();
         dummyDepthTarget.reset();
     }
-    
+
     void FramebufferRenderer::resetFramebuffers(RenderWorker *worker, bool ubershadersVisible, float ditherNoiseStrength, const RenderMultisampling &multisampling) {
         instanceDrawCallVector.clear();
         instanceTransformVector.clear();
@@ -319,7 +319,7 @@ namespace RT64 {
         dynamicTextureBarrierVector.clear();
     }
 
-    void FramebufferRenderer::createGPUTiles(const DrawCallTile *callTiles, uint32_t callTileCount, interop::GPUTile *dstGPUTiles, const FramebufferManager *fbManager, 
+    void FramebufferRenderer::createGPUTiles(const DrawCallTile *callTiles, uint32_t callTileCount, interop::GPUTile *dstGPUTiles, const FramebufferManager *fbManager,
         TextureCache *textureCache, uint64_t submissionFrame)
     {
         for (uint32_t i = 0; i < callTileCount; i++) {
@@ -327,7 +327,7 @@ namespace RT64 {
             if (!callTile.valid) {
                 continue;
             }
-            
+
             interop::GPUTile &gpuTile = dstGPUTiles[i];
             if (callTile.tileCopyUsed) {
                 const auto &it = fbManager->tileCopies.find(callTile.tmemHashOrID);
@@ -384,7 +384,7 @@ namespace RT64 {
 
         return dstIndex;
     }
-    
+
     uint32_t FramebufferRenderer::getTextureIndex(RenderTarget *renderTarget) {
         assert(renderTarget != nullptr);
 
@@ -392,7 +392,7 @@ namespace RT64 {
         dynamicTextureViewVector.emplace_back(DynamicTextureView{ renderTarget->getResolvedTexture(), dstIndex, renderTarget->getResolvedTextureView()});
         return dstIndex;
     }
-    
+
     uint32_t FramebufferRenderer::getTextureIndex(const FramebufferManager::TileCopy &tileCopy) {
         assert(tileCopy.texture != nullptr);
 
@@ -401,11 +401,11 @@ namespace RT64 {
         dynamicTextureBarrierVector.emplace_back(RenderTextureBarrier(tileCopy.texture.get(), RenderTextureLayout::SHADER_READ));
         return dstIndex;
     }
-    
+
     void FramebufferRenderer::updateShaderDescriptorSet(RenderWorker *worker, const DrawBuffers *drawBuffers, const OutputBuffers *outputBuffers, const bool raytracingEnabled) {
         assert(worker != nullptr);
         assert(drawBuffers != nullptr);
-        
+
         const bool createSet = (descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1));
         if (createSet) {
             descTextureSet = std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device, ((textureCacheSize + 1) * 3) / 2);
@@ -480,6 +480,7 @@ namespace RT64 {
             }
             descCommonSet->setBuffer(descCommonSet->SceneLights, rtResources->lightsBuffer.get(), sizeof(interop::PointLight) * std::max(rtResources->rtParams.lightsCount, 1U), RenderBufferStructuredView(sizeof(interop::PointLight)));
             descCommonSet->setBuffer(descCommonSet->interleavedRasters, interleavedRastersBuffer.get(), sizeof(interop::InterleavedRaster) * std::max(interleavedRastersCount, 1U), RenderBufferStructuredView(sizeof(interop::InterleavedRaster)));
+            descCommonSet->setTexture(descCommonSet->gBakedLight, rtResources->bakedLightTexture.get(), RenderTextureLayout::GENERAL);
             descCommonSet->setTexture(descCommonSet->gBlueNoise, blueNoiseTexture, RenderTextureLayout::SHADER_READ);
             descCommonSet->setBuffer(descCommonSet->instanceExtraParams, drawBuffers->extraParamsBuffer.get(), RenderBufferStructuredView(sizeof(interop::ExtraParams)));
             descCommonSet->setBuffer(descCommonSet->RtParams, rtResources->rtParamsBuffer.get(), sizeof(interop::RaytracingParams));
@@ -635,7 +636,7 @@ namespace RT64 {
         if (vertexTestZSet == nullptr) {
             vertexTestZSet = std::make_unique<RSPVertexTestZDescriptorSet>(worker->device);
         }
-        
+
         vertexTestZSet->setBuffer(vertexTestZSet->screenPos, outputBuffers->screenPosBuffer.buffer.get(), RenderBufferStructuredView(sizeof(float) * 4));
         vertexTestZSet->setBuffer(vertexTestZSet->srcFaceIndices, drawBuffers->faceIndicesBuffer.get(), drawBuffers->faceIndicesBuffer.allocatedSize, RenderBufferStructuredView(sizeof(uint32_t)));
         vertexTestZSet->setBuffer(vertexTestZSet->dstFaceIndices, outputBuffers->testZIndexBuffer.buffer.get(), outputBuffers->testZIndexBuffer.allocatedSize, RenderBufferStructuredView(sizeof(uint32_t)));
@@ -657,7 +658,7 @@ namespace RT64 {
         if (depthState == readOnly) {
             return false;
         }
-        
+
         RenderFramebuffer *renderFramebuffer = readOnly ? fbStorage->colorWriteDepthRead.get() : fbStorage->colorDepthWrite.get();
         const RenderTextureLayout depthReadState = RenderTextureLayout::DEPTH_READ;
         const RenderTextureLayout depthWriteState = RenderTextureLayout::DEPTH_WRITE;
@@ -666,7 +667,7 @@ namespace RT64 {
         depthState = readOnly;
         return true;
     }
-    
+
     void FramebufferRenderer::submitRasterScene(RenderWorker *worker, const Framebuffer &framebuffer, RenderFramebufferStorage *fbStorage, const RasterScene &rasterScene, bool &depthState) {
         InstanceDrawCall::Type previousCallType = InstanceDrawCall::Type::Unknown;
         bool previousVertexTestZ = false;
@@ -713,11 +714,11 @@ namespace RT64 {
         if (fbStorage->colorTarget != nullptr) {
             switchToGraphicsPipeline();
         }
-        
+
         for (uint32_t i : rasterScene.instanceIndices) {
             const InstanceDrawCall &drawCall = instanceDrawCallVector[i];
             switch (drawCall.type) {
-            case InstanceDrawCall::Type::IndexedTriangles: 
+            case InstanceDrawCall::Type::IndexedTriangles:
             case InstanceDrawCall::Type::RawTriangles:
             case InstanceDrawCall::Type::RegularRect: {
                 assert(fbStorage->colorTarget != nullptr);
@@ -772,7 +773,7 @@ namespace RT64 {
                     worker->commandList->setPipeline(triangles.pipeline);
                     previousPipeline = triangles.pipeline;
                 }
-                
+
                 rasterParams.renderIndex = i;
                 rasterParams.screenScale = triangles.screenScale;
                 rasterParams.screenOffset = triangles.screenOffset;
@@ -1038,7 +1039,7 @@ namespace RT64 {
         rtParams.giReproject = !rtResources->skipReprojection && rtResources->denoiserEnabled && (rtParams.giSamples > 0) && (rtResources->upscalerMode != UpscaleMode::DLSS) ? 1 : 0;
         rtParams.binaryLockMask = (rtResources->upscalerMode != UpscaleMode::FSR);
         rtParams.interleavedRastersCount = interleavedRastersCount;
-        
+
     }
 
     // Split out of updateRaytracingScene, which used to end with this and ran before
@@ -1126,6 +1127,7 @@ namespace RT64 {
             RenderTextureBarrier(rtResources->reflectionTexture.get(), RenderTextureLayout::GENERAL),
             RenderTextureBarrier(rtResources->refractionTexture.get(), RenderTextureLayout::GENERAL),
             RenderTextureBarrier(rtResources->transparentTexture.get(), RenderTextureLayout::GENERAL),
+            RenderTextureBarrier(rtResources->bakedLightTexture.get(), RenderTextureLayout::GENERAL),
             RenderTextureBarrier(rtResources->flowTexture.get(), RenderTextureLayout::GENERAL),
             RenderTextureBarrier(rtResources->reactiveMaskTexture.get(), RenderTextureLayout::GENERAL),
             RenderTextureBarrier(rtResources->lockMaskTexture.get(), RenderTextureLayout::GENERAL),
@@ -1134,7 +1136,7 @@ namespace RT64 {
         };
 
         worker->commandList->barriers(RenderBarrierStage::COMPUTE, preDispatchBarriers, uint32_t(std::size(preDispatchBarriers)));
-        
+
         // These two are used again by the debug draw at the end, so they stay outside
         // the stage gate.
         Framebuffer &framebuffer = framebufferVector[framebufferCount - 1];
@@ -1359,6 +1361,7 @@ namespace RT64 {
         afterDispatchBarriers.emplace_back(rtResources->reflectionTexture.get(), RenderTextureLayout::SHADER_READ);
         afterDispatchBarriers.emplace_back(rtResources->refractionTexture.get(), RenderTextureLayout::SHADER_READ);
         afterDispatchBarriers.emplace_back(rtResources->transparentTexture.get(), RenderTextureLayout::SHADER_READ);
+        afterDispatchBarriers.emplace_back(rtResources->bakedLightTexture.get(), RenderTextureLayout::SHADER_READ);
         afterDispatchBarriers.emplace_back(rtResources->flowTexture.get(), RenderTextureLayout::SHADER_READ);
 
         worker->commandList->barriers(RenderBarrierStage::GRAPHICS, afterDispatchBarriers);
@@ -1388,6 +1391,7 @@ namespace RT64 {
         RenderTextureBarrier afterComposeBarriers[] = {
             RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE),
             RenderTextureBarrier(rtOutputCur, RenderTextureLayout::SHADER_READ),
+            RenderTextureBarrier(rtResources->bakedLightTexture.get(), RenderTextureLayout::GENERAL),
             RenderTextureBarrier(rtResources->filteredDirectLightTexture[1].get(), RenderTextureLayout::GENERAL),
             RenderTextureBarrier(rtResources->filteredIndirectLightTexture[1].get(), RenderTextureLayout::GENERAL),
             RenderTextureBarrier(rtResources->reactiveMaskTexture.get(), RenderTextureLayout::SHADER_READ),
@@ -1606,7 +1610,7 @@ namespace RT64 {
         if (rspSmoothNormalVector.empty()) {
             return;
         }
-        
+
         worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(outputBuffers->worldNormBuffer.buffer.get(), RenderBufferAccess::WRITE));
 
         const int ThreadGroupSize = 64;
@@ -1689,7 +1693,7 @@ namespace RT64 {
         for (RenderTarget *target : framebuffer.transitionRenderTargetSet) {
             startBarriers.emplace_back(RenderTextureBarrier(target->getResolvedTexture(), RenderTextureLayout::SHADER_READ));
         }
-        
+
         const RenderTargetDrawCall &targetDrawCall = framebuffer.renderTargetDrawCall;
         RenderTarget *colorTarget = targetDrawCall.fbStorage->colorTarget;
         RenderTarget *depthTarget = targetDrawCall.fbStorage->depthTarget;
@@ -1827,7 +1831,7 @@ namespace RT64 {
 
     void FramebufferRenderer::addFramebuffer(const DrawParams &p) {
         assert(p.fbStorage != nullptr);
-        
+
         // Setup framebuffer pair data and descriptor set.
         const FramebufferPair &fbPair = p.curWorkload->fbPairs[p.fbPairIndex];
         interop::FramebufferParams fbParams;
@@ -1973,7 +1977,7 @@ namespace RT64 {
         const float originalWidth = p.fbWidth * p.resolutionScale.y;
         const float commonHeight = float(p.targetHeight);
         framebuffer.viewport = RenderViewport(0.0f, 0.0f, wideWidth, commonHeight);
-        
+
         const interop::float2 halfViewportSize = { framebuffer.viewport.width / 2.0f, framebuffer.viewport.height / 2.0f };
         const interop::float2 halfPixelOffset = { 1.0f / framebuffer.viewport.width, -1.0f / framebuffer.viewport.height };
         const float middleViewport = (wideWidth / 2.0f) - (originalWidth / 2.0f);
@@ -2126,7 +2130,7 @@ namespace RT64 {
                 }
             }
 #       endif
-            
+
             auto &triangles = instanceDrawCall.triangles;
             triangles.screenScale = { 1.0f, 1.0f };
             triangles.screenOffset = halfPixelOffset;
@@ -2481,7 +2485,7 @@ namespace RT64 {
                             rspSmoothNormalVector.push_back(rspSmoothNormal);
                         }
                     }
-                    else 
+                    else
 #               endif
                     {
                         triangles.shaderDesc = call.shaderDesc;
@@ -2497,7 +2501,7 @@ namespace RT64 {
                                 !copyMode && call.shaderDesc.otherMode.zUpd(),
                                 (call.shaderDesc.otherMode.cvgDst() == CVG_DST_WRAP) || (call.shaderDesc.otherMode.cvgDst() == CVG_DST_SAVE));
                         }
-                        
+
                         triangles.faceCount = call.callDesc.triangleCount;
                         triangles.vertexTestZ = (vertexTestZCallIndex >= 0);
                         triangles.postBlendDitherNoise = false;
@@ -2561,7 +2565,7 @@ namespace RT64 {
                         if (usesViewport) {
                             triangles.scissor = viewportScissorIntersection(viewportClip, triangles.scissor);
                         }
-                        
+
                         if (triangles.vertexTestZ && usesViewport) {
                             instanceDrawCallVector[vertexTestZCallIndex].vertexTestZ.indexCount += call.callDesc.triangleCount * 3;
                             vertexTestZFaceIndicesStart += call.callDesc.triangleCount * 3;
@@ -2675,7 +2679,7 @@ namespace RT64 {
 
                     rtScene.instanceIndices.push_back(instanceIndex);
                 }
-                else 
+                else
 #           endif
                 {
                     rasterScene.instanceIndices.push_back(instanceIndex);

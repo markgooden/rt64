@@ -211,6 +211,9 @@ namespace RT64 {
         uint32_t gPrevIndirectLightAccum;
         uint32_t gFilteredDirectLight;
         uint32_t gFilteredIndirectLight;
+        // The game's baked vertex shade, kept apart from the light the tracer finds so a
+        // denoiser can filter one without smearing the other.
+        uint32_t gBakedLight;
         uint32_t gBlueNoise;
 
         FramebufferRendererDescriptorCommonSet(const SamplerLibrary &samplerLibrary, bool raytracing, RenderDevice *device = nullptr) {
@@ -263,6 +266,7 @@ namespace RT64 {
             gPrevIndirectLightAccum = builder.addReadWriteTexture(64);
             gFilteredDirectLight = builder.addReadWriteTexture(65);
             gFilteredIndirectLight = builder.addReadWriteTexture(66);
+                gBakedLight = builder.addReadWriteTexture(68);
             gBlueNoise = builder.addTexture(67);
             // Immutable samplers must come after every view binding in the set. plume turns
             // them into static samplers and filters them out of the view descriptor table
@@ -447,6 +451,7 @@ namespace RT64 {
         uint32_t gReflection;
         uint32_t gRefraction;
         uint32_t gTransparent;
+        uint32_t gBakedLight;
         uint32_t gBackgroundColor;
 
         RaytracingComposeDescriptorSet(const SamplerLibrary &samplerLibrary, RenderDevice *device = nullptr) {
@@ -465,6 +470,11 @@ namespace RT64 {
             // ordered before the RT scene is lost - 63 of level.0000's 218 draw calls
             // (PDRT64_RT_DUMPCOVER).
             gBackgroundColor = builder.addTexture(8);
+
+            // The baked shade, unfiltered. Compose adds it to the filtered traced light:
+            // the bake is per vertex and smooth, and running it through a denoiser would
+            // soften the game's own lighting for no reason.
+            gBakedLight = builder.addTexture(9);
 
             // Immutable samplers go last. They become static samplers in the root signature and
             // are left out of the view table, but the descriptor set still spends a view heap

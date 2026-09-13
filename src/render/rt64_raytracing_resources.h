@@ -175,6 +175,9 @@ namespace RT64 {
         std::unique_ptr<RenderTexture> reflectionTexture;
         std::unique_ptr<RenderTexture> refractionTexture;
         std::unique_ptr<RenderTexture> transparentTexture;
+        // The game's baked vertex shade on its own. Written by primary visibility, added
+        // by compose, and never filtered - see gBakedLight in the descriptor sets.
+        std::unique_ptr<RenderTexture> bakedLightTexture;
         std::unique_ptr<RenderTexture> flowTexture;
         std::unique_ptr<RenderTexture> reactiveMaskTexture;
         std::unique_ptr<RenderTexture> lockMaskTexture;

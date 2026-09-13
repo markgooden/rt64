@@ -213,7 +213,15 @@ void PrimaryRayGen() {
     // The baked lighting, seeded into the direct light buffer for DirectRayGen to add to.
     // With no lights in range this reconstructs exactly what the game draws - albedo times
     // shade - and a light contributes on top of it rather than instead of it.
-    gDirectLightAccum[pixel] = float4(payload.ambient * RtParams.bakedLightScale, 1.0f);
+    // The baked shade goes in its own buffer and the traced light starts from nothing.
+    //
+    // They used to share one, with this line as the seed DirectRayGen accumulated onto. That
+    // cannot survive a denoiser: the traced light is noisy and wants filtering, the baked shade
+    // is per-vertex and smooth and filtering it would soften the game's own lighting for no
+    // reason. Compose adds them back together, so the image is unchanged until something
+    // actually filters one of them.
+    gBakedLight[pixel] = float4(payload.ambient * RtParams.bakedLightScale, 1.0f);
+    gDirectLightAccum[pixel] = float4(0.0f, 0.0f, 0.0f, 1.0f);
     gFlow[pixel] = float2(0.0f, 0.0f);
     gReactiveMask[pixel] = 0.0f;
     gLockMask[pixel] = 0.0f;
@@ -238,9 +246,9 @@ void PrimaryRayGen() {
 void DirectRayGen() {
     const uint2 pixel = DispatchRaysIndex().xy;
 
-    // Seeded by PrimaryRayGen with the surface's baked lighting, so every early return here
-    // leaves that in place. Clearing first would throw away the only light most of Perfect
-    // Dark has: the rooms the game lights are the minority.
+    // Cleared by PrimaryRayGen, so this accumulates only what the tracer finds. The baked
+    // shade is in gBakedLight and compose adds it separately - an early return here therefore
+    // costs nothing that was already there.
     const int instanceId = gInstanceId[pixel];
     if (instanceId < 0) {
         return;
@@ -264,7 +272,7 @@ void DirectRayGen() {
         return;
     }
 
-    float3 accumulated = gDirectLightAccum[pixel].rgb;
+    float3 accumulated = float3(0.0f, 0.0f, 0.0f);
 
     for (uint i = 0; i < lightCount; i++) {
         const PointLight light = SceneLights[i];

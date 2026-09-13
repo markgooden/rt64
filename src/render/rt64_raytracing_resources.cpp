@@ -763,6 +763,7 @@ namespace RT64 {
         // gFlow is float2, the two mask textures are scalar. The masks are half float rather
         // than 8-bit unorm because they are written through a UAV, and typed UAV writes to
         // 8-bit formats are not guaranteed without checking format support first.
+        bakedLightTexture = createStorageTexture(device, textureWidth, textureHeight, HDR);
         flowTexture = createStorageTexture(device, textureWidth, textureHeight, RenderFormat::R16G16_FLOAT);
         reactiveMaskTexture = createStorageTexture(device, textureWidth, textureHeight, RenderFormat::R16_FLOAT);
         lockMaskTexture = createStorageTexture(device, textureWidth, textureHeight, RenderFormat::R16_FLOAT);
@@ -938,6 +939,7 @@ namespace RT64 {
         composeSet->setTexture(composeSet->gFlow, flowTexture.get(), RenderTextureLayout::SHADER_READ);
         composeSet->setTexture(composeSet->gDiffuse, diffuseTexture.get(), RenderTextureLayout::SHADER_READ);
         composeSet->setTexture(composeSet->gDirectLight, filteredDirectLightTexture[1].get(), RenderTextureLayout::SHADER_READ);
+        composeSet->setTexture(composeSet->gBakedLight, bakedLightTexture.get(), RenderTextureLayout::SHADER_READ);
         composeSet->setTexture(composeSet->gIndirectLight, filteredIndirectLightTexture[1].get(), RenderTextureLayout::SHADER_READ);
         composeSet->setTexture(composeSet->gReflection, reflectionTexture.get(), RenderTextureLayout::SHADER_READ);
         composeSet->setTexture(composeSet->gRefraction, refractionTexture.get(), RenderTextureLayout::SHADER_READ);
