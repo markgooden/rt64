@@ -2226,6 +2226,63 @@ namespace RT64 {
                 }
                 else {
 #               if RT_ENABLED
+                    // PDRT64_RT_DUMPSHADE: the baked vertex shade of every draw call, as CSV.
+                    //
+                    // Perfect Dark paints its lighting into vertex colours, so this is an
+                    // irradiance painting and the surfaces the artists treated as light
+                    // sources should sit at the top of it. That is the premise RT-PLAN 8
+                    // proposes bootstrapping emissive materials from, and this is the
+                    // measurement that says whether they separate cleanly or shade into
+                    // everything else.
+                    //
+                    // Vertices whose bytes are a normal rather than a colour are skipped:
+                    // lightCount decides which (RSPProcessCS.hlsl:97), and a normal's bytes
+                    // read as a brightness are noise.
+                    if (getenv("PDRT64_RT_DUMPSHADE") != nullptr) {
+                        static bool shadeHeader = false;
+                        static uint32_t shadeFrames = 0;
+                        if (!shadeHeader) {
+                            shadeHeader = true;
+                            fprintf(stderr, "SHADE,call,tris,verts,litVerts,meanLuma,maxLuma,pegged\n");
+                        }
+
+                        if (shadeFrames < 1) {
+                            const auto &faceIndices = drawData.faceIndices;
+                            const auto &normCol = drawData.normColBytes;
+                            const auto &lightCounts = drawData.lightCounts;
+                            const uint32_t indexStart = call.meshDesc.faceIndicesStart;
+                            const uint32_t indexCount = call.callDesc.triangleCount * 3;
+                            double sumLuma = 0.0;
+                            double maxLuma = 0.0;
+                            uint32_t counted = 0;
+                            uint32_t litVerts = 0;
+                            uint32_t pegged = 0;
+                            for (uint32_t k = 0; k < indexCount; k++) {
+                                const uint32_t vi = ((indexStart + k) < faceIndices.size()) ? faceIndices[indexStart + k] : 0;
+                                if ((vi >= lightCounts.size()) || ((vi * 4 + 2) >= normCol.size())) {
+                                    continue;
+                                }
+
+                                if (lightCounts[vi] > 0) {
+                                    litVerts++;
+                                    continue;
+                                }
+
+                                const double luma = 0.299 * normCol[vi * 4 + 0] + 0.587 * normCol[vi * 4 + 1] + 0.114 * normCol[vi * 4 + 2];
+                                sumLuma += luma;
+                                maxLuma = std::max(maxLuma, luma);
+                                pegged += (luma >= 250.0) ? 1 : 0;
+                                counted++;
+                            }
+
+                            fprintf(stderr, "SHADE,%u,%u,%u,%u,%.1f,%.1f,%.3f\n",
+                                call.callDesc.callIndex, call.callDesc.triangleCount, counted, litVerts,
+                                (counted > 0) ? (sumLuma / counted) : 0.0, maxLuma,
+                                (counted > 0) ? (double(pegged) / counted) : 0.0);
+                            fflush(stderr);
+                        }
+                    }
+
                     // PDRT64_RT_DUMPCALL=<a,b,...>: everything known about named draw
                     // calls. The two large quads that dominate the error against the raster
                     // render were identified as draw calls 140 and 141 by inverting the
