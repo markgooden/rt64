@@ -25,7 +25,56 @@ Texture2D<float4> gBackgroundColor : register(t8);
 
 // The game's baked vertex shade, on its own and unfiltered. Primary visibility writes it
 // apart from the traced light so a denoiser can smooth one without smearing the other.
+// Its alpha carries the traced surface's depth, in the 0..1 the raster path's depth buffer
+// holds - PrimaryRayGen puts it there because this shader has no constant buffer and so
+// cannot derive it.
 Texture2D<float4> gBakedLight : register(t9);
+
+// The depth the raster path left behind gBackgroundColor. Bound since 2026-09-13 and unread
+// until now, which was the bug: without it a traced pixel wins over a rastered one
+// unconditionally, so any raster surface in front of traced geometry is simply discarded.
+//
+// A grille wall in Investigation is drawn by the raster path while the room behind it is
+// traced. Every pixel where the trace hit something returned the traced shading and dropped
+// the grille, and every pixel where it missed returned the grille - so the wall came out
+// striped and see-through, with guards visible through it. That is the "clipping through
+// walls" a playthrough reported on 2026-09-13.
+#ifdef MULTISAMPLING
+Texture2DMS<float> gBackgroundDepth : register(t10);
+
+float loadBackgroundDepth(int2 pixelPos) {
+    // Sample zero only. This is an ordering test, not a shading one: averaging depth across
+    // samples invents a value between two surfaces and belongs to neither.
+    return gBackgroundDepth.Load(pixelPos, 0);
+}
+#else
+Texture2D<float> gBackgroundDepth : register(t10);
+
+float loadBackgroundDepth(int2 pixelPos) {
+    return gBackgroundDepth.Load(int3(pixelPos, 0));
+}
+#endif
+
+// Whether the raster path drew something nearer here than the traced surface.
+//
+// A load rather than a filtered sample, and by normalised coordinate because the depth target
+// is not the size the trace ran at - it carries the resolution scale and the dispatch does not
+// (measured 960x660 against 640x440).
+bool rasterIsInFront(float2 uv, float tracedZ) {
+    uint width = 0;
+    uint height = 0;
+    uint samples = 0;
+#ifdef MULTISAMPLING
+    gBackgroundDepth.GetDimensions(width, height, samples);
+#else
+    uint levels = 0;
+    gBackgroundDepth.GetDimensions(0, width, height, levels);
+#endif
+
+    // Cleared to 1.0, so a pixel the raster path never drew loses this comparison on its own.
+    const float rasterZ = loadBackgroundDepth(int2(uv * float2(width, height)));
+    return rasterZ < tracedZ;
+}
 
 float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
     float4 diffuse = gDiffuse.SampleLevel(gSampler, uv, 0);
@@ -42,11 +91,24 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
     // of nothing, and both cases need it.
     const float4 transparent = gTransparent.SampleLevel(gSampler, uv, 0);
 
+    // What the raster path drew, and how far away it was. Read before the branch for the same
+    // reason the transparent layer is: a rastered surface can be in front of a traced hit or
+    // in front of nothing.
+    const float3 background = gBackgroundColor.SampleLevel(gSampler, uv, 0).rgb;
+
     if (diffuse.a > EPSILON) {
+        const float4 baked = gBakedLight.SampleLevel(gSampler, uv, 0);
+
+        // The raster path wins where it drew something nearer. Its pixel is already shaded, so
+        // it is emitted as it stands - the same reasoning the interleaved layer branch above
+        // rests on - with the blended layer still going over it.
+        if (rasterIsInFront(uv, baked.a)) {
+            return float4(background * (1.0f - transparent.a) + transparent.rgb, 1.0f);
+        }
+
         // Traced light plus the baked shade. They were one buffer until 2026-09-13, and
         // the sum is identical - only what may be filtered has changed.
-        const float3 directLight = gDirectLight.SampleLevel(gSampler, uv, 0).rgb +
-            gBakedLight.SampleLevel(gSampler, uv, 0).rgb;
+        const float3 directLight = gDirectLight.SampleLevel(gSampler, uv, 0).rgb + baked.rgb;
         const float3 indirectLight = gIndirectLight.SampleLevel(gSampler, uv, 0).rgb;
         const float4 reflection = gReflection.SampleLevel(gSampler, uv, 0);
         float3 refraction = gRefraction.SampleLevel(gSampler, uv, 0).rgb;
@@ -87,7 +149,6 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         // The blended surface goes over the raster background too. A pane of glass in front
         // of geometry the tracer did not reach is still in front of it, and returning the
         // background alone dropped it.
-        const float3 background = gBackgroundColor.SampleLevel(gSampler, uv, 0).rgb;
         return float4(background * (1.0f - transparent.a) + transparent.rgb, 1.0f);
     }
 }

@@ -20,6 +20,7 @@
 #include "shaders/GaussianFilterRGB3x3CS.hlsl.spirv.h"
 #include "shaders/RtEdgeFilterCS.hlsl.spirv.h"
 #include "shaders/RtDepthWritePS.hlsl.spirv.h"
+#include "shaders/ComposeMSPS.hlsl.spirv.h"
 #include "shaders/BoxFilterCS.hlsl.spirv.h"
 #include "shaders/BicubicScalingCS.hlsl.spirv.h"
 #include "shaders/HistogramAverageCS.hlsl.spirv.h"
@@ -68,6 +69,7 @@
 #   include "shaders/GaussianFilterRGB3x3CS.hlsl.dxil.h"
 #   include "shaders/RtEdgeFilterCS.hlsl.dxil.h"
 #   include "shaders/RtDepthWritePS.hlsl.dxil.h"
+#   include "shaders/ComposeMSPS.hlsl.dxil.h"
 #   include "shaders/BoxFilterCS.hlsl.dxil.h"
 #   include "shaders/BicubicScalingCS.hlsl.dxil.h"
 #   include "shaders/HistogramAverageCS.hlsl.dxil.h"
@@ -837,6 +839,27 @@ namespace RT64 {
             pipelineDesc.depthWriteEnabled = true;
             pipelineDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
             rtDepthWrite.pipeline = device->createGraphicsPipeline(pipelineDesc);
+        }
+
+        // Compose, multisampled. Identical to the one in setupCommonShaders except for the
+        // shader blob: only the gBackgroundDepth SRV type changes, and the render target is the
+        // single-sampled output texture in both cases, so no multisampling is set here.
+        {
+            RaytracingComposeDescriptorSet descriptorSet(samplerLibrary);
+            layoutBuilder.begin();
+            layoutBuilder.addDescriptorSet(descriptorSet);
+            layoutBuilder.end();
+            composeMS.pipelineLayout = layoutBuilder.create(device);
+
+            std::unique_ptr<RenderShader> pixelShader = device->createShader(CREATE_SHADER_INPUTS(ComposeMSPSBlobDXIL, ComposeMSPSBlobSPIRV, ComposeMSPSBlobMSL, "PSMain", shaderFormat));
+            RenderGraphicsPipelineDesc pipelineDesc;
+            pipelineDesc.pipelineLayout = composeMS.pipelineLayout.get();
+            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::AlphaBlend();
+            pipelineDesc.renderTargetFormat[0] = RenderFormat::R32G32B32A32_FLOAT;
+            pipelineDesc.renderTargetCount = 1;
+            pipelineDesc.vertexShader = fullScreenVertexShader.get();
+            pipelineDesc.pixelShader = pixelShader.get();
+            composeMS.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
 
         // Copy color to depth and depth to color.

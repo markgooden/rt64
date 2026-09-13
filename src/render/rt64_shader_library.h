@@ -37,6 +37,11 @@ namespace RT64 {
         // Writes the traced surface's depth into the raster path's depth buffer, so raster
         // draws ordered after an RT scene still have their occluders. See RtDepthWritePS.hlsl.
         ShaderRecord rtDepthWrite;
+
+        // Compose again, against a multisampled depth target. Only the type of the
+        // gBackgroundDepth SRV differs; the pipeline is the same, because compose draws into
+        // the single-sampled output texture either way.
+        ShaderRecord composeMS;
         ShaderRecord histogramAverage;
         ShaderRecord histogramClear;
         ShaderRecord histogramSet;

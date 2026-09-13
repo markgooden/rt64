@@ -131,6 +131,16 @@ namespace RT64 {
     // Trace blended draws instead of leaving them to the raster path. Off, and only for
     // measuring what the tracer does to them - the classification it restores is the one that
     // put walls through walls for two playthroughs. See blendedCall in the draw-call walk.
+    // The traced depth write-back (RtDepthWritePS.hlsl). On; PDRT64_RT_DEPTHWRITE=0 turns it
+    // off, which is how its effect on a frame is measured rather than argued about.
+    static bool rtDepthWriteBack() {
+        static const bool enabled = []() {
+            const char *env = getenv("PDRT64_RT_DEPTHWRITE");
+            return (env == nullptr) || (env[0] != '0');
+        }();
+        return enabled;
+    }
+
     static bool rtTraceBlended() {
         static const bool enabled = []() {
             const char *env = getenv("PDRT64_RT_TRACEBLEND");
@@ -1499,7 +1509,11 @@ namespace RT64 {
 
         // Draw the raytracing output.
         RT64_LOG_PRINTF("Composing the raytracing output");
-        const ShaderRecord &composeShader = shaderLibrary->compose;
+        // The variant whose gBackgroundDepth SRV matches the depth target it is about to read.
+        // Compose orders the traced surface against the rastered one, and a Texture2D bound to
+        // a multisampled resource reads nothing.
+        const bool depthIsMultisampled = (depthTarget != nullptr) && (depthTarget->multisampling.sampleCount > 1);
+        const ShaderRecord &composeShader = depthIsMultisampled ? shaderLibrary->composeMS : shaderLibrary->compose;
         worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
         worker->commandList->setPipeline(composeShader.pipeline.get());
         worker->commandList->setGraphicsPipelineLayout(composeShader.pipelineLayout.get());
@@ -1736,7 +1750,7 @@ namespace RT64 {
         // colour target, so nothing here can disturb what that draw reads. The depth target is
         // in DEPTH_READ on the way in (submitDepthAccess) and is put back to it on the way out,
         // so the caller's depthState bookkeeping stays true.
-        if (depthTarget != nullptr) {
+        if ((depthTarget != nullptr) && rtDepthWriteBack()) {
             worker->commandList->barriers(RenderBarrierStage::GRAPHICS,
                 RenderTextureBarrier(depthTarget->texture.get(), RenderTextureLayout::DEPTH_WRITE));
 

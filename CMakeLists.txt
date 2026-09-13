@@ -527,6 +527,9 @@ build_compute_shader(rt64 "src/shaders/FbChangesClearCS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/FbChangesDrawColorPS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/FbChangesDrawDepthPS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/RtDepthWritePS.hlsl")
+# Compose reads the raster path's depth to order a traced surface against a rastered one, so
+# it needs the multisampled variant whenever the framebuffer has one.
+build_pixel_shader(  rt64 "src/shaders/ComposePS.hlsl" "src/shaders/ComposeMSPS.hlsl" "-D MULTISAMPLING")
 build_compute_shader(rt64 "src/shaders/FbReadAnyChangesCS.hlsl" "src/shaders/FbReadAnyChangesCS.hlsl" "-O0")
 build_compute_shader(rt64 "src/shaders/FbReinterpretCS.hlsl" "src/shaders/FbReinterpretCS.hlsl" "-O0")
 build_compute_shader(rt64 "src/shaders/FbReadAnyFullCS.hlsl" "src/shaders/FbReadAnyFullCS.hlsl" "-O0")
