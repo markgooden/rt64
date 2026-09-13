@@ -141,39 +141,52 @@ namespace RT64 {
         return enabled;
     }
 
-    // The affine that maps a projection's own world space into a scene's: V_proj * inverse(V_scene).
+    // The affine that maps a projection's own world space into a scene's: inverse(V_proj) * V_scene.
+    //
+    // Derived rather than guessed, and then measured. A call's BLAS vertices sit at p * M * V_P,
+    // because worldTransforms is mul(modelMatrix, extended.viewProjMatrix) (rt64_rsp.cpp:591)
+    // and this game leaves the extended matrices unset, so the "world" a vertex is written into
+    // is its own projection's view space. The scene's own instances sit at p * M * V_S. For an
+    // instance transform rel to put the first where the second is:
+    //
+    //     p * M * V_P * rel == p * M * V_S      for every p
+    //  => V_P * rel == V_S
+    //  => rel == inverse(V_P) * V_S
+    //
+    // It was V_proj * inverse(V_scene) until 2026-09-13, which is neither the same product nor
+    // the same order. PDRT64_RT_CHECKJOIN prints the residual ||V_P * rel - V_S|| for both: on
+    // level.0000 the old one reads 1.73 on one projection and 226.17 on two others, and this
+    // one reads 0.000009 on all three. That is the whole reason PDRT64_RT_JOINVIEWS was off.
     //
     // Both matrices are rigid - measured on a real frame, rows unit length and orthogonal - so
-    // the inverse is the transposed rotation and the negated translation carried through it,
-    // with no general inversion needed. Written out once here because the joined-view path and
-    // the occluders both need exactly this and had no business each having a copy.
+    // inverse(V_P) is its rotation transposed with the translation carried through it, and no
+    // general inversion is needed. Written out once here because the joined-view path and the
+    // occluders both need exactly this.
     static RenderAffineTransform joinAffine(const hlslpp::float4x4 &pv, const hlslpp::float4x4 &sv) {
         float invRot[3][3];
         for (int r = 0; r < 3; r++) {
             for (int c = 0; c < 3; c++) {
-                invRot[r][c] = sv[c][r];
+                invRot[r][c] = pv[c][r];
             }
         }
 
         float invPos[3];
         for (int c = 0; c < 3; c++) {
-            invPos[c] = -(sv[3][0] * invRot[0][c] + sv[3][1] * invRot[1][c] + sv[3][2] * invRot[2][c]);
+            invPos[c] = -(pv[3][0] * invRot[0][c] + pv[3][1] * invRot[1][c] + pv[3][2] * invRot[2][c]);
         }
 
-        // relative = V_proj * inverse(V_scene), in the game's row vector order.
+        // relative = inverse(V_proj) * V_scene, in the game's row vector order.
         float rel[4][3];
         for (int r = 0; r < 3; r++) {
             for (int c = 0; c < 3; c++) {
-                rel[r][c] = pv[r][0] * invRot[0][c] + pv[r][1] * invRot[1][c] + pv[r][2] * invRot[2][c];
+                rel[r][c] = invRot[r][0] * sv[0][c] + invRot[r][1] * sv[1][c] + invRot[r][2] * sv[2][c];
             }
         }
 
         for (int c = 0; c < 3; c++) {
-            rel[3][c] = pv[3][0] * invRot[0][c] + pv[3][1] * invRot[1][c] + pv[3][2] * invRot[2][c] + invPos[c];
+            rel[3][c] = invPos[0] * sv[0][c] + invPos[1] * sv[1][c] + invPos[2] * sv[2][c] + sv[3][c];
         }
 
-        // D3D12 wants object-to-world with column vectors, so the rotation is transposed on the
-        // way out and the translation becomes the last column.
         RenderAffineTransform out;
         for (int r = 0; r < 3; r++) {
             for (int c = 0; c < 3; c++) {
@@ -186,26 +199,78 @@ namespace RT64 {
         return out;
     }
 
+    // PDRT64_RT_CHECKJOIN: does the join transform actually map one projection's space into
+    // another's?
+    //
+    // The requirement is an identity, not an opinion. A call's BLAS vertices sit at
+    // p * M * V_P, because worldTransforms is mul(modelMatrix, extended.viewProjMatrix)
+    // (rt64_rsp.cpp:591) and this game leaves the extended matrices unset, so the "world" a
+    // vertex is written into is its own projection's view space. The scene's own instances sit
+    // at p * M * V_S. For an instance transform rel to place the first where the second is:
+    //
+    //     p * M * V_P * rel == p * M * V_S      for every p
+    //  => V_P * rel == V_S
+    //  => rel == inverse(V_P) * V_S
+    //
+    // This prints the residual ||V_P * rel - V_S|| for that candidate and for the one the code
+    // has been using, V_P * inverse(V_S), on every out-of-space projection in the frame. The
+    // right one reads zero and the wrong one does not, and no vertex data is needed to tell
+    // them apart.
+    static void checkJoin(const hlslpp::float4x4 &vp, const hlslpp::float4x4 &vs, uint32_t projIndex) {
+        if (getenv("PDRT64_RT_CHECKJOIN") == nullptr) {
+            return;
+        }
+
+        auto residual = [&](const RenderAffineTransform &rel) {
+            // rel is object-to-world with column vectors; undo that to get back the row vector
+            // matrix the algebra above is written in.
+            hlslpp::float4x4 r = hlslpp::float4x4::identity();
+            for (int i = 0; i < 3; i++) {
+                for (int c = 0; c < 3; c++) {
+                    r[i][c] = rel.m[c][i];
+                }
+            }
+
+            for (int c = 0; c < 3; c++) {
+                r[3][c] = rel.m[c][3];
+            }
+
+            const hlslpp::float4x4 lhs = hlslpp::mul(vp, r);
+            float worst = 0.0f;
+            for (int i = 0; i < 4; i++) {
+                for (int j = 0; j < 4; j++) {
+                    worst = std::max(worst, std::abs(float(lhs[i][j]) - float(vs[i][j])));
+                }
+            }
+
+            return worst;
+        };
+
+        static uint32_t joinLogs = 0;
+        if (joinLogs++ < 16) {
+            fprintf(stderr, "CHECKJOIN,proj %u,residual %.6f\n", projIndex, residual(joinAffine(vp, vs)));
+            fflush(stderr);
+        }
+    }
+
+
     // Raster geometry as occluders in the tracer's BVH.
     //
     //   0     off entirely.
-    //   1     default - only geometry drawn in the RT scene's own view space, where the
-    //         instance transform is identity and the placement is therefore exact.
-    //   all   every projection, placed with joinAffine.
+    //   1     only geometry drawn in the RT scene's own view space.
+    //   all   default - every projection, placed with joinAffine.
     //
-    // "all" is what fixes a wall the tracer sees through when the wall belongs to another
-    // projection, which is the case a playthrough reported on 2026-09-13. It is not the
-    // default because the join it depends on is not trusted: on level.0000 it puts the console
-    // across the doorway as a wall and costs 16.41 -> 17.36 mean error, while on the reported
-    // frames it gains +0.371 -> +0.414 edge NCC. The same transform is why
-    // PDRT64_RT_JOINVIEWS is off. Validating it fixes both at once, and until then this stays
-    // a knob rather than a decision.
+    // "all" became the default once joinAffine was corrected and occluders were restricted to
+    // draws preceding the traced geometry. Measured against the raster reference, it now costs
+    // nothing anywhere it does not help: level.0000 and two mid-level frames are unchanged to
+    // four decimal places, and the two frames a playthrough reported gain +0.3708 -> +0.4009
+    // and +0.3740 -> +0.4036 edge NCC.
     enum class RtOccluderMode { Off, SceneSpace, All };
     static RtOccluderMode rtOccluders() {
         static const RtOccluderMode mode = []() {
             const char *env = getenv("PDRT64_RT_OCCLUDERS");
             if (env == nullptr) {
-                return RtOccluderMode::SceneSpace;
+                return RtOccluderMode::All;
             }
 
             if (env[0] == '0') {
@@ -3102,8 +3167,18 @@ namespace RT64 {
                     // scene takes its matrices from that projection and a call can arrive
                     // before it has opened - which is where the wall that started this lives.
                     const RtOccluderMode occluderMode = rtOccluders();
+                    // Only draws that precede the traced geometry.
+                    //
+                    // An occluder exists so compose can hand a pixel back to the raster path.
+                    // That is only worth doing for a draw whose colour is already in the
+                    // background - one ordered before the RT scene. A draw ordered after it
+                    // paints over the composed image on its own, so blocking primary rays for
+                    // it removes traced shading that was about to be overdrawn anyway, and
+                    // loses shading wherever it does not actually cover.
+                    const bool beforeTracedGeometry = rtScene.instanceIndices.empty();
                     bool occluderWanted = (occluderMode != RtOccluderMode::Off) && p.rtEnabled &&
-                                          worldGeometry && (rtProjIndex != UINT32_MAX) &&
+                                          worldGeometry && beforeTracedGeometry &&
+                                          (rtProjIndex != UINT32_MAX) &&
                                           (call.callDesc.triangleCount > 0);
                     if (occluderWanted) {
                         const Projection &sceneProj = fbPair.projections[rtProjIndex];
@@ -3114,6 +3189,8 @@ namespace RT64 {
                             instanceTransform = RenderAffineTransform();
                         }
                         else if (occluderMode == RtOccluderMode::All) {
+                            checkJoin(drawData.modViewTransforms[proj.transformsIndex],
+                                drawData.modViewTransforms[sceneProj.transformsIndex], pr);
                             instanceTransform = joinAffine(drawData.modViewTransforms[proj.transformsIndex],
                                 drawData.modViewTransforms[sceneProj.transformsIndex]);
                         }
