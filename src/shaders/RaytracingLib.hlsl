@@ -12,16 +12,18 @@
 //
 //   0 primary   1 direct   2 indirect   3 reflection   4 refraction
 //
-// Only primary visibility is implemented. The other four are declared and clear the buffer
-// they own, so the dispatch order, the binding table layout and the compose pass all stay
-// intact and the shading passes can be filled in one at a time without touching the frame
-// graph. Anything else would mean either changing the guarded driver or leaving stale
-// contents in the accumulation buffers for compose to read.
+// Primary visibility, direct lighting and the blended surfaces are implemented. Indirect and
+// reflection are still declared and clear the buffer they own, so the dispatch order, the
+// binding table layout and the compose pass all stay intact and the remaining passes can be
+// filled in one at a time without touching the frame graph. Anything else would mean either
+// changing the guarded driver or leaving stale contents in the accumulation buffers for
+// compose to read.
 
 #include "shared/rt64_color_combiner.h"
 
 #include "FbRendererCommon.hlsli"
 #include "FbRendererRT.hlsli"
+#include "BlueNoise.hlsli"
 #include "Random.hlsli"
 #include "TextureSampler.hlsli"
 
@@ -307,27 +309,81 @@ void DirectRayGen() {
             continue;
         }
 
-        RayDesc shadowRay;
-        shadowRay.Origin = surfacePosition + surfaceNormal * ShadowRayBias;
-        shadowRay.Direction = toLight;
-        shadowRay.TMin = 0.0f;
-        shadowRay.TMax = lightDistance - ShadowRayBias;
+        // Sampled across the light's own extent, not at its centre.
+        //
+        // These lights have a real size: pointRadius is the room light's bounding box extent,
+        // taken from the fitting itself (port/rt64/rt64_host.cpp:574-596). One ray at the
+        // centre of an area light can only ever answer "lit" or "not", which is a hard edge
+        // by construction - the penumbra is the part of the light some of the surface can see
+        // and the rest cannot, and a point has no parts.
+        //
+        // The disc basis and the blue noise sample position are the construction RT64's own
+        // ComputeLight uses (Lights.hlsli:81-96), with both axes normalised: there the basis
+        // vectors are left unnormalised, so the sampled disc is squashed by however far the
+        // light direction is from the up axis.
+        const uint shadowSamples = max(RtParams.diSamples, 1u);
+        const float sampleRadius = (shadowSamples > 1) ? max(light.pointRadius, 0.0f) : 0.0f;
+        float3 perpX = cross(-toLight, float3(0.0f, 1.0f, 0.0f));
+        if (all(perpX == 0.0f)) {
+            perpX = float3(1.0f, 0.0f, 0.0f);
+        }
 
-        SurfacePayload shadowPayload;
-        shadowPayload.normal = float3(0.0f, 0.0f, 0.0f);
-        shadowPayload.albedo = float3(0.0f, 0.0f, 0.0f);
-        shadowPayload.ambient = float3(0.0f, 0.0f, 0.0f);
-        shadowPayload.t = -1.0f;
-        shadowPayload.alpha = 0.0f;
-        shadowPayload.instanceId = -1;
+        perpX = normalize(perpX);
+        const float3 perpY = normalize(cross(perpX, -toLight));
 
-        // The shadow hit group and the shadow miss shader are the second entries in their
-        // tables (rt64_raytracing_shader_cache.cpp:30-33, :143-144), which is what the two
-        // ones select. ACCEPT_FIRST_HIT_AND_END_SEARCH because any blocker will do - the
-        // shadow closest hit exists only to say that something was in the way.
-        TraceRay(SceneBVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 1, 0, 1, shadowRay, shadowPayload);
-        if (shadowPayload.instanceId < 0) {
-            accumulated += contribution;
+        float visibility = 0.0f;
+        for (uint s = 0; s < shadowSamples; s++) {
+            // Blue noise rather than a hash: it is already bound and its spatial distribution
+            // is what keeps a four sample penumbra from looking like four sample noise.
+            //
+            // Seeded by the sample index alone, deliberately not by the frame counter, which
+            // is what RT64's own ComputeLight does (Lights.hlsli:93). Measured 2026-09-13 on
+            // level.0000 with a test light: with the frame in the seed, 8.64% of pixels
+            // change by more than 8 levels between consecutive frames - shimmer over most of
+            // the lit surface. Temporal noise is the right trade only once something
+            // accumulates it, and the filter stage is still a stub that clears its buffer.
+            // Without the frame, consecutive frames are byte identical and the penumbra is
+            // a fixed screen space dither instead.
+            float2 disc = getBlueNoise(gBlueNoise, pixel, s).rg * 2.0f - 1.0f;
+            disc = (length(disc) > 0.0f) ? (normalize(disc) * saturate(length(disc))) : float2(0.0f, 0.0f);
+
+            const float3 samplePosition = light.position + (perpX * disc.x + perpY * disc.y) * sampleRadius;
+            float3 sampleDirection = samplePosition - surfacePosition;
+            const float sampleDistance = length(sampleDirection);
+            if (sampleDistance <= ShadowRayBias) {
+                visibility += 1.0f;
+                continue;
+            }
+
+            sampleDirection /= sampleDistance;
+
+            RayDesc shadowRay;
+            shadowRay.Origin = surfacePosition + surfaceNormal * ShadowRayBias;
+            shadowRay.Direction = sampleDirection;
+            shadowRay.TMin = 0.0f;
+            shadowRay.TMax = sampleDistance - ShadowRayBias;
+
+            SurfacePayload shadowPayload;
+            shadowPayload.normal = float3(0.0f, 0.0f, 0.0f);
+            shadowPayload.albedo = float3(0.0f, 0.0f, 0.0f);
+            shadowPayload.ambient = float3(0.0f, 0.0f, 0.0f);
+            shadowPayload.t = -1.0f;
+            shadowPayload.alpha = 0.0f;
+            shadowPayload.instanceId = -1;
+
+            // The shadow hit group and the shadow miss shader are the second entries in their
+            // tables (rt64_raytracing_shader_cache.cpp:30-33, :143-144), which is what the two
+            // ones select. ACCEPT_FIRST_HIT_AND_END_SEARCH because any blocker will do - the
+            // shadow closest hit exists only to say that something was in the way.
+            TraceRay(SceneBVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 1, 0, 1, shadowRay, shadowPayload);
+            if (shadowPayload.instanceId < 0) {
+                visibility += 1.0f;
+            }
+        }
+
+        visibility /= float(shadowSamples);
+        if (visibility > 0.0f) {
+            accumulated += contribution * visibility;
         }
     }
 
