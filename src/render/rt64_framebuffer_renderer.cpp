@@ -1278,7 +1278,14 @@ namespace RT64 {
         bool denoiseGI = rtResources->denoiserEnabled && (rtResources->rtParams.giSamples > 0) && (rtResources->upscalerMode != UpscaleMode::DLSS);
         {
             RenderTexture *source = rtResources->indirectLightTexture[rtResources->swapBuffers ? 1 : 0].get();
-            RenderTexture *dest = rtResources->filteredIndirectLightTexture[denoiseGI ? 0 : 1].get();
+            // Which half the raw copy lands in depends on which filter will read it. The
+            // a-trous cascade starts by reading [1] and alternates, ending back in [1]; the
+            // gaussian it replaced starts at [0]. Getting this wrong is silent: the cascade
+            // reads an empty half, writes over the half holding the light, and compose
+            // receives a buffer that never saw a bounce - which measured as GI changing
+            // the frame by nothing at all.
+            const bool edgeFiltered = rtEdgeFilterEnabled() && (rtStageMask() & RtStageFilter);
+            RenderTexture *dest = rtResources->filteredIndirectLightTexture[(denoiseGI && !edgeFiltered) ? 0 : 1].get();
 
             RenderTextureBarrier beforeCopyBarriers[] = {
                 RenderTextureBarrier(source, RenderTextureLayout::COPY_SOURCE),
