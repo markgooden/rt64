@@ -30,6 +30,9 @@
 static const float ShadowRayBias = 0.5f;
 
 struct SurfacePayload {
+    // The combiner's alpha for the surface, which is what a blended draw is blended by.
+    // Only the transparent pass reads it; primary visibility skips blended surfaces.
+    float alpha;
     float3 normal;
     float3 albedo;
     float3 ambient;
@@ -81,6 +84,7 @@ void PrimaryRayGen() {
     payload.normal = float3(0.0f, 0.0f, 0.0f);
     payload.albedo = float3(0.0f, 0.0f, 0.0f);
     payload.ambient = float3(0.0f, 0.0f, 0.0f);
+    payload.alpha = 0.0f;
     payload.t = -1.0f;
     payload.instanceId = -1;
 
@@ -314,6 +318,7 @@ void DirectRayGen() {
         shadowPayload.albedo = float3(0.0f, 0.0f, 0.0f);
         shadowPayload.ambient = float3(0.0f, 0.0f, 0.0f);
         shadowPayload.t = -1.0f;
+        shadowPayload.alpha = 0.0f;
         shadowPayload.instanceId = -1;
 
         // The shadow hit group and the shadow miss shader are the second entries in their
@@ -341,11 +346,51 @@ void ReflectionRayGen() {
     gReflection[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 }
 
+// The blended surfaces, which primary visibility deliberately does not see.
+//
+// A draw the game blends carries BlendedRayQueryMask (rt64_common.h:38) instead of the depth
+// masks, and PrimaryRayGen traces with that bit cleared, because tracing a blended surface as
+// an opaque hit draws it solid over whatever is behind it. So they were missing from the traced
+// image entirely - on level.0000, three of 129 traced draw calls, and they are two large quads.
+//
+// This finds them along the same ray, stopping at whatever primary visibility settled on, and
+// writes the result premultiplied for compose to blend over the opaque image. One layer only:
+// the nearest blended surface wins and anything behind it is ignored, which is wrong for two
+// panes of glass and right for the overwhelming majority of what the game blends.
 [shader("raygeneration")]
 void RefractionRayGen() {
     const uint2 pixel = DispatchRaysIndex().xy;
+    const uint2 dimensions = DispatchRaysDimensions().xy;
     gRefraction[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
-    gTransparent[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    RayDesc ray = primaryRayForPixel(pixel, dimensions);
+
+    // gDepth carries the primary hit's distance along this same ray, or farDist on a miss
+    // (PrimaryRayGen), so it is already in the units TMax wants and needs no transform.
+    ray.TMax = clamp(gDepth[pixel], ray.TMin, RtParams.farDist);
+
+    SurfacePayload payload;
+    payload.normal = float3(0.0f, 0.0f, 0.0f);
+    payload.albedo = float3(0.0f, 0.0f, 0.0f);
+    payload.ambient = float3(0.0f, 0.0f, 0.0f);
+    payload.alpha = 0.0f;
+    payload.t = -1.0f;
+    payload.instanceId = -1;
+
+    // 0x8 is BlendedRayQueryMask (common/rt64_common.h:38), spelled as a literal for the
+    // same reason PrimaryRayGen spells 0xF7 as one: that header is not HLSL.
+    TraceRay(SceneBVH, RAY_FLAG_NONE, 0x8, 0, 0, 0, ray, payload);
+
+    if (payload.instanceId >= 0) {
+        // The same reconstruction the opaque path uses - albedo times the shade the game baked
+        // into its vertex colours - so a blended surface is lit the way its opaque neighbour
+        // is. Premultiplied, because compose blends it over rather than adding it.
+        const float alpha = saturate(payload.alpha);
+        gTransparent[pixel] = float4(payload.albedo * payload.ambient * alpha, alpha);
+    }
+    else {
+        gTransparent[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
 }
 
 // Fetches the surface where the ray struck it. The instance carries its draw call index
@@ -404,6 +449,11 @@ struct SurfaceShading {
     // Dark is where the level's baked lighting lives. It is light, not material, so it
     // belongs with the lighting rather than multiplied into the albedo.
     float3 ambient;
+
+    // The alpha the game would blend this surface with, from the run of the combiner
+    // that keeps the real shade. alphaCompareValue below is the alpha *test* input and
+    // is not the same thing once a combiner does anything interesting with alpha.
+    float alpha;
     float alphaCompareValue;
 };
 
@@ -496,6 +546,7 @@ static SurfaceShading shadeSurface(RenderIndices renderIndices, uint i0, uint i1
     SurfaceShading shading;
     shading.albedo = albedoColor.rgb;
     shading.ambient = shadeColor.rgb;
+    shading.alpha = combinerColor.a;
     shading.alphaCompareValue = alphaCompareValue;
     return shading;
 }
@@ -563,6 +614,7 @@ void SurfaceClosestHit(inout SurfacePayload payload, in TriangleAttributes attri
     const SurfaceShading shading = shadeSurface(renderIndices, i0, i1, i2, barycentricsOf(attributes));
     payload.albedo = shading.albedo;
     payload.ambient = shading.ambient;
+    payload.alpha = shading.alpha;
 }
 
 // Alpha compare, as a hit that never happened.

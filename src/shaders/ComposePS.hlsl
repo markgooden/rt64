@@ -34,12 +34,15 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         return float4(diffuse.rgb, 1.0f);
     }
 
+    // Read before the branch: a blended surface can be in front of a traced hit or in front
+    // of nothing, and both cases need it.
+    const float4 transparent = gTransparent.SampleLevel(gSampler, uv, 0);
+
     if (diffuse.a > EPSILON) {
         float3 directLight = gDirectLight.SampleLevel(gSampler, uv, 0).rgb;
         float3 indirectLight = gIndirectLight.SampleLevel(gSampler, uv, 0).rgb;
         float3 reflection = gReflection.SampleLevel(gSampler, uv, 0).rgb;
         float3 refraction = gRefraction.SampleLevel(gSampler, uv, 0).rgb;
-        float3 transparent = gTransparent.SampleLevel(gSampler, uv, 0).rgb;
 
         // We intentionally mix the HDR buffer that will be upscaled in sRGB space to preserve the color of effects like fog and such.
         // No LinearToSrgb. Measured 2026-09-12 against the OpenGL reference over 25612
@@ -53,7 +56,12 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         float3 result = lerp(diffuse.rgb, diffuse.rgb * (directLight + indirectLight), diffuse.a);
         result += reflection;
         result += refraction;
-        result += transparent;
+
+        // Blended over, not added. RefractionRayGen writes the nearest blended surface
+        // premultiplied with its combiner alpha, so this is the standard over operator and it
+        // darkens where the surface is dark - adding it could only ever brighten, which is
+        // wrong for every blended surface the game uses to tint rather than to glow.
+        result = result * (1.0f - transparent.a) + transparent.rgb;
         return float4(result, 1.0f);
     }
     else {
@@ -66,6 +74,10 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         // the colour target, already in the space the final image is in, where diffuse.rgb is
         // the tracer's linear albedo. Converting it would brighten the untraced half of the
         // image relative to the traced half.
-        return float4(gBackgroundColor.SampleLevel(gSampler, uv, 0).rgb, 1.0f);
+        // The blended surface goes over the raster background too. A pane of glass in front
+        // of geometry the tracer did not reach is still in front of it, and returning the
+        // background alone dropped it.
+        const float3 background = gBackgroundColor.SampleLevel(gSampler, uv, 0).rgb;
+        return float4(background * (1.0f - transparent.a) + transparent.rgb, 1.0f);
     }
 }
