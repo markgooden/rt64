@@ -33,6 +33,10 @@ namespace RT64 {
         ShaderRecord fbWriteDepthMS;
         ShaderRecord gaussianFilterRGB3x3;
         ShaderRecord rtEdgeFilter;
+
+        // Writes the traced surface's depth into the raster path's depth buffer, so raster
+        // draws ordered after an RT scene still have their occluders. See RtDepthWritePS.hlsl.
+        ShaderRecord rtDepthWrite;
         ShaderRecord histogramAverage;
         ShaderRecord histogramClear;
         ShaderRecord histogramSet;

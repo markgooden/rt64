@@ -19,6 +19,7 @@
 #include "shaders/FbWriteDepthCSMS.hlsl.spirv.h"
 #include "shaders/GaussianFilterRGB3x3CS.hlsl.spirv.h"
 #include "shaders/RtEdgeFilterCS.hlsl.spirv.h"
+#include "shaders/RtDepthWritePS.hlsl.spirv.h"
 #include "shaders/BoxFilterCS.hlsl.spirv.h"
 #include "shaders/BicubicScalingCS.hlsl.spirv.h"
 #include "shaders/HistogramAverageCS.hlsl.spirv.h"
@@ -66,6 +67,7 @@
 #   include "shaders/FbWriteDepthCSMS.hlsl.dxil.h"
 #   include "shaders/GaussianFilterRGB3x3CS.hlsl.dxil.h"
 #   include "shaders/RtEdgeFilterCS.hlsl.dxil.h"
+#   include "shaders/RtDepthWritePS.hlsl.dxil.h"
 #   include "shaders/BoxFilterCS.hlsl.dxil.h"
 #   include "shaders/BicubicScalingCS.hlsl.dxil.h"
 #   include "shaders/HistogramAverageCS.hlsl.dxil.h"
@@ -799,6 +801,42 @@ namespace RT64 {
             pipelineDesc.depthWriteEnabled = true;
             pipelineDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
             fbChangesDrawDepth.pipeline = device->createGraphicsPipeline(pipelineDesc);
+        }
+
+        // Raytracing depth write-back.
+        //
+        // Lives here rather than beside the compose pipeline in setupCommonShaders because it
+        // draws into the framebuffer's own depth target, so its sample count has to match the
+        // one the raster path uses, and only this function is told what that is.
+        {
+            RaytracingComposeDescriptorSet descriptorSet(samplerLibrary);
+            layoutBuilder.begin();
+            layoutBuilder.addDescriptorSet(descriptorSet);
+            layoutBuilder.end();
+            rtDepthWrite.pipelineLayout = layoutBuilder.create(device);
+
+            std::unique_ptr<RenderShader> pixelShader = device->createShader(CREATE_SHADER_INPUTS(RtDepthWritePSBlobDXIL, RtDepthWritePSBlobSPIRV, RtDepthWritePSBlobMSL, "PSMain", shaderFormat));
+            RenderGraphicsPipelineDesc pipelineDesc;
+            pipelineDesc.pipelineLayout = rtDepthWrite.pipelineLayout.get();
+
+            // The colour target is bound because the framebuffer this draws into has one, and
+            // masked off because the composed image is already in it. Only depth is written.
+            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            pipelineDesc.renderTargetBlend[0].renderTargetWriteMask = uint8_t(RenderColorWriteEnable::UNKNOWN);
+            pipelineDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(usesHDR);
+            pipelineDesc.renderTargetCount = 1;
+            pipelineDesc.vertexShader = fullScreenVertexShader.get();
+            pipelineDesc.pixelShader = pixelShader.get();
+            pipelineDesc.multisampling = multisampling;
+            pipelineDesc.depthEnabled = true;
+
+            // LESS, not ALWAYS. The raster draws ordered before the RT scene wrote real depth
+            // into this buffer and a traced surface behind one of them must not overwrite it -
+            // the interleaved layers in particular are drawn first and are often nearer.
+            pipelineDesc.depthFunction = RenderComparisonFunction::LESS;
+            pipelineDesc.depthWriteEnabled = true;
+            pipelineDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
+            rtDepthWrite.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
 
         // Copy color to depth and depth to color.

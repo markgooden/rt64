@@ -128,6 +128,17 @@ namespace RT64 {
         return enabled;
     }
 
+    // Trace blended draws instead of leaving them to the raster path. Off, and only for
+    // measuring what the tracer does to them - the classification it restores is the one that
+    // put walls through walls for two playthroughs. See blendedCall in the draw-call walk.
+    static bool rtTraceBlended() {
+        static const bool enabled = []() {
+            const char *env = getenv("PDRT64_RT_TRACEBLEND");
+            return (env != nullptr) && (env[0] != '0');
+        }();
+        return enabled;
+    }
+
     static bool rtJoinViews() {
         // Off again by default since 2026-09-13, having been on for a few hours.
         //
@@ -1099,7 +1110,7 @@ namespace RT64 {
         rtResources->updateLightsBuffer(worker, rtScene);
     }
 
-    void FramebufferRenderer::submitRaytracingScene(RenderWorker *worker, RenderTarget *colorTarget, RenderTarget *depthTarget, const RaytracingScene &rtScene) {
+    void FramebufferRenderer::submitRaytracingScene(RenderWorker *worker, RenderFramebufferStorage *fbStorage, RenderTarget *colorTarget, RenderTarget *depthTarget, const RaytracingScene &rtScene) {
         // The acceleration structure, the binding table and the output buffers are built
         // once per frame, for the one scene endFramebuffers picks (:1786-1800, and the FIXME
         // above it). This is called for every framebuffer that produced a scene, so a frame
@@ -1504,7 +1515,6 @@ namespace RT64 {
         RenderTextureBarrier afterComposeBarriers[] = {
             RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE),
             RenderTextureBarrier(rtOutputCur, RenderTextureLayout::SHADER_READ),
-            RenderTextureBarrier(rtResources->bakedLightTexture.get(), RenderTextureLayout::GENERAL),
             RenderTextureBarrier(rtResources->filteredDirectLightTexture[1].get(), RenderTextureLayout::GENERAL),
             RenderTextureBarrier(rtResources->filteredIndirectLightTexture[1].get(), RenderTextureLayout::GENERAL),
             RenderTextureBarrier(rtResources->reactiveMaskTexture.get(), RenderTextureLayout::SHADER_READ),
@@ -1714,6 +1724,43 @@ namespace RT64 {
             worker->commandList->drawInstanced(3, 1, 0, 0);
         }
 
+        // Write the traced depth back into the raster path's depth buffer.
+        //
+        // Everything the tracer took was removed from the raster path, and its depth went with
+        // it. Any raster draw ordered after this scene - a trailing blended quad, a later
+        // projection - then tests against a depth buffer with holes exactly where the traced
+        // geometry is, and a draw that tests depth without writing it has no occluders at all.
+        // Measured on level.0000: calls 214, 217 and 218 paint the lit console over Joanna.
+        //
+        // Last in the scene, after the post process draw has put the composed image into the
+        // colour target, so nothing here can disturb what that draw reads. The depth target is
+        // in DEPTH_READ on the way in (submitDepthAccess) and is put back to it on the way out,
+        // so the caller's depthState bookkeeping stays true.
+        if (depthTarget != nullptr) {
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS,
+                RenderTextureBarrier(depthTarget->texture.get(), RenderTextureLayout::DEPTH_WRITE));
+
+            worker->commandList->setFramebuffer(fbStorage->colorDepthWrite.get());
+            worker->commandList->setViewports(postProcessViewport);
+            worker->commandList->setScissors(rtScene.scissor);
+            worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
+
+            const ShaderRecord &depthWrite = shaderLibrary->rtDepthWrite;
+            worker->commandList->setPipeline(depthWrite.pipeline.get());
+            worker->commandList->setGraphicsPipelineLayout(depthWrite.pipelineLayout.get());
+            worker->commandList->setGraphicsDescriptorSet(rtResources->composeSet->get(), 0);
+            worker->commandList->drawInstanced(3, 1, 0, 0);
+
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS,
+                RenderTextureBarrier(depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ));
+        }
+
+        // The baked light goes back to GENERAL here rather than with the other post-compose
+        // barriers: the depth write-back above reads its alpha, which is where PrimaryRayGen
+        // leaves the traced surface's z.
+        worker->commandList->barriers(RenderBarrierStage::GRAPHICS,
+            RenderTextureBarrier(rtResources->bakedLightTexture.get(), RenderTextureLayout::GENERAL));
+
         // Mark targets for resolve.
         colorTarget->markForResolve();
     }
@@ -1888,7 +1935,7 @@ namespace RT64 {
                 }
 
                 submitDepthAccess(worker, targetDrawCall.fbStorage, true, depthState);
-                submitRaytracingScene(worker, targetDrawCall.fbStorage->colorTarget, targetDrawCall.fbStorage->depthTarget, rtScene);
+                submitRaytracingScene(worker, targetDrawCall.fbStorage, targetDrawCall.fbStorage->colorTarget, targetDrawCall.fbStorage->depthTarget, rtScene);
             }
             else
 #       endif
@@ -2481,6 +2528,45 @@ namespace RT64 {
                         }
                     }
 
+                    // A blended draw stays on the raster path.
+                    //
+                    // It cannot be traced and it cannot be dropped, and until 2026-09-13 it was
+                    // effectively dropped. Classifying it Raytracing takes it away from the
+                    // raster path; the mask below then hides it from primary visibility,
+                    // because tracing a blended surface as an opaque primary hit draws it
+                    // solid over what is behind it. Both halves are individually reasonable
+                    // and together they delete the geometry - and deleting an occluder is how
+                    // a wall stops hiding what is behind it.
+                    //
+                    // That is what two playthroughs reported: surfaces visible through other
+                    // surfaces, invisible stairs, "very strange" indoors. On the frame those
+                    // reports were traced to (t13-0913-1553-manual-01.0040, calls 110-133)
+                    // *every* traced call is forceBlend, so the tracer contributed nothing at
+                    // all and its 24 draws simply went missing from the raster image.
+                    //
+                    // Leaving the call as a raster type sends it through checkRasterScene and
+                    // the interleaved-raster path below, which is the existing machinery for a
+                    // raster draw ordered inside an RT scene. It is then drawn by the real
+                    // blender, depth tested against the real depth buffer, in stream order -
+                    // which is what the OpenGL reference does and what invariant 1 calls
+                    // correct.
+                    //
+                    // PDRT64_RT_TRACEBLEND=1 restores the old classification for measurement.
+                    // It is not a supported way to play.
+                    const bool blendedCall = call.callDesc.otherMode.forceBlend() && !rtTraceBlended();
+                    const bool rtCallProj = rtProj && !blendedCall;
+
+                    // PDRT64_RT_DUMPBLEND also names the calls this rule takes off the traced
+                    // path, so a change in the traced instance count can be attributed.
+                    if ((getenv("PDRT64_RT_DUMPBLEND") != nullptr) && rtProj && blendedCall) {
+                        const interop::OtherMode &om = call.callDesc.otherMode;
+                        fprintf(stderr, "BLENDKEEP,%u,%u,%d,%d,%d,0x%04X\n",
+                            call.callDesc.callIndex, call.callDesc.triangleCount,
+                            om.zCmp() ? 1 : 0, om.zUpd() ? 1 : 0, om.clrOnCvg() ? 1 : 0,
+                            om.blenderInputs());
+                        fflush(stderr);
+                    }
+
                     // PDRT64_RT_DUMPCALL=<a,b,...>: everything known about named draw
                     // calls. The two large quads that dominate the error against the raster
                     // render were identified as draw calls 140 and 141 by inverting the
@@ -2517,14 +2603,14 @@ namespace RT64 {
                                 om.zCmp() ? 1 : 0, om.zUpd() ? 1 : 0, om.alphaCompare() >> G_MDSFT_ALPHACOMPARE,
                                 om.forceBlend() ? 1 : 0, om.alphaCvgSel() ? 1 : 0, om.cvgXAlpha() ? 1 : 0,
                                 om.clrOnCvg() ? 1 : 0, om.blenderInputs(), call.callDesc.tileCount,
-                                rtProj ? 1 : 0);
+                                rtCallProj ? 1 : 0);
                             fprintf(stderr, "rt64:   call %u: usesLOD %d, textDetail %u, combiner L 0x%08X H 0x%08X\n",
                                 callIndex, om_textLOD_isLod(om) ? 1 : 0, om.textDetail(), om.L, om.H);
                             fflush(stderr);
                         }
                     }
 
-                    if (rtProj) {
+                    if (rtCallProj) {
                         instanceDrawCall.type = InstanceDrawCall::Type::Raytracing;
 
                         if (hitGroupVector.empty()) {
@@ -2541,14 +2627,12 @@ namespace RT64 {
 
                         const interop::OtherMode &otherMode = call.callDesc.otherMode;
                         // A blended surface is not opaque, and tracing it as an opaque primary
-                        // hit draws it solid over whatever is behind it. Transparency is still
-                        // a stub, so the honest thing for now is to let primary visibility see
-                        // through it, and the mask is how: the bit replaces the depth ones so
-                        // a ray that does not ask for it skips the instance entirely.
+                        // hit draws it solid over whatever is behind it. The bit replaces the
+                        // depth ones so a ray that does not ask for it skips the instance.
                         //
-                        // Measured rare - 3 of 129 traced calls on level.0000
-                        // (PDRT64_RT_DUMPBLEND) - and those three are large flat quads that
-                        // dominate the error against the raster render.
+                        // Only reachable under PDRT64_RT_TRACEBLEND now: blended draws stay on
+                        // the raster path (see blendedCall above), because hiding one from
+                        // primary visibility *and* taking it off the raster path deletes it.
                         raytracing.queryMask = (otherMode.zCmp() || otherMode.zUpd()) ? DepthRayQueryMask : NoDepthRayQueryMask;
                         if (otherMode.forceBlend()) {
                             raytracing.queryMask = BlendedRayQueryMask;
