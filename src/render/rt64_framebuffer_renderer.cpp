@@ -129,9 +129,31 @@ namespace RT64 {
     }
 
     static bool rtJoinViews() {
+        // Off again by default since 2026-09-13, having been on for a few hours.
+        //
+        // It measured extremely well on level.0000 - 7.81 mean error and +0.7489 edge NCC
+        // against the raster path's 6.12 and +0.4671 - and then a playthrough found what one
+        // fixture cannot show. Inside the first building, walkways and railings are placed
+        // rotated, geometry appears through walls, stairs go missing. Replaying a captured
+        // frame from that session beside the raster render of the same frame shows it
+        // plainly: a walkway the game draws horizontal, the tracer draws diagonal.
+        //
+        // Not wrong in an obvious way, either. Both view matrices in a real frame measure
+        // rigid, and correcting the transform to V_proj * inverse(V_scene) - the general
+        // form, rather than assuming the scene's view is identity - changes nothing here,
+        // because the scene that opens does have an identity view. So some projection's
+        // geometry is already in the space this then moves it out of, and which ones is not
+        // yet known.
+        //
+        // The fix needs a check rather than another guess: transform the call's own vertices
+        // and confirm they land where the game's own matrices put them on screen, refusing
+        // to join when they do not. Until that exists this stays off - a default that
+        // misplaces level geometry is worse than one that traces less of it.
+        //
+        // PDRT64_RT_JOINVIEWS=1 turns it back on.
         static const bool enabled = []() {
             const char *env = getenv("PDRT64_RT_JOINVIEWS");
-            return (env == nullptr) || (env[0] != '0');
+            return (env != nullptr) && (env[0] != '0');
         }();
         return enabled;
     }
@@ -2148,6 +2170,23 @@ namespace RT64 {
                         // (rt64_workload_queue.cpp:309), so a split that is wrong for this game
                         // would separate projections that the raster path treats as one camera.
                         fprintf(stderr, "rt64:     proj %u combined viewProj diff: %.9f\n", pr, viewProjDiff);
+
+                        // Is the difference a rigid transform? The instance transform that
+                        // places a joined projection in the scene carries the rotation part
+                        // of its view matrix and nothing else, which is only correct if the
+                        // 3x3 is orthonormal. A projection drawn in some other space - the
+                        // first person weapon, for one - need not be.
+                        {
+                            const auto &pv = drawData.modViewTransforms[proj.transformsIndex];
+                            float rowLen[3];
+                            for (int r = 0; r < 3; r++) {
+                                rowLen[r] = sqrtf(pv[r][0] * pv[r][0] + pv[r][1] * pv[r][1] + pv[r][2] * pv[r][2]);
+                            }
+
+                            const float dot01 = pv[0][0] * pv[1][0] + pv[0][1] * pv[1][1] + pv[0][2] * pv[1][2];
+                            fprintf(stderr, "rt64:     proj %u view rows %.4f %.4f %.4f, row0.row1 %.5f, translation %.1f %.1f %.1f\n",
+                                pr, rowLen[0], rowLen[1], rowLen[2], dot01, pv[3][0], pv[3][1], pv[3][2]);
+                        }
                         if (!rtProjCompatible) {
                             // The shape of the difference, not just its size. A pure
                             // translation can be folded into the instance transform of a
@@ -2666,13 +2705,56 @@ namespace RT64 {
                 RenderAffineTransform instanceTransform;
 #           if RT_ENABLED
                 if (rtJoinViews() && (instanceDrawCall.type == InstanceDrawCall::Type::Raytracing) && !rtScene.instanceIndices.empty()) {
+                    // The map from this call's space into the scene's, which is
+                    // V_proj * inverse(V_scene) and not V_proj.
+                    //
+                    // It was V_proj alone, which is the same thing only when the scene that
+                    // opened has an identity view matrix. That is true of level.0000 and is
+                    // not true in general: a real level frame has two view spaces in it and
+                    // either can open the scene. When the scene opened with the camera's own
+                    // view, every joined call was transformed by a camera matrix it had
+                    // already been placed by, which put railings and stairs through walls and
+                    // is what a playthrough found on 2026-09-13.
+                    //
+                    // Both matrices are rigid - measured on a real frame, rows unit length and
+                    // orthogonal - so the inverse is the transposed rotation and the negated
+                    // translation through it, with no general inversion needed.
                     const auto &pv = drawData.modViewTransforms[proj.transformsIndex];
+                    const auto &sv = rtScene.curViewMatrix;
+
+                    // inverse(V_scene): rotation transposed, translation carried through it.
+                    float invRot[3][3];
                     for (int r = 0; r < 3; r++) {
                         for (int c = 0; c < 3; c++) {
-                            instanceTransform.m[r][c] = pv[c][r];
+                            invRot[r][c] = sv[c][r];
+                        }
+                    }
+
+                    float invPos[3];
+                    for (int c = 0; c < 3; c++) {
+                        invPos[c] = -(sv[3][0] * invRot[0][c] + sv[3][1] * invRot[1][c] + sv[3][2] * invRot[2][c]);
+                    }
+
+                    // relative = V_proj * inverse(V_scene), in the game's row vector order.
+                    float rel[4][3];
+                    for (int r = 0; r < 3; r++) {
+                        for (int c = 0; c < 3; c++) {
+                            rel[r][c] = pv[r][0] * invRot[0][c] + pv[r][1] * invRot[1][c] + pv[r][2] * invRot[2][c];
+                        }
+                    }
+
+                    for (int c = 0; c < 3; c++) {
+                        rel[3][c] = pv[3][0] * invRot[0][c] + pv[3][1] * invRot[1][c] + pv[3][2] * invRot[2][c] + invPos[c];
+                    }
+
+                    // D3D12 wants object-to-world with column vectors, so the rotation is
+                    // transposed on the way out and the translation becomes the last column.
+                    for (int r = 0; r < 3; r++) {
+                        for (int c = 0; c < 3; c++) {
+                            instanceTransform.m[r][c] = rel[c][r];
                         }
 
-                        instanceTransform.m[r][3] = pv[3][r];
+                        instanceTransform.m[r][3] = rel[3][r];
                     }
                 }
 #           endif
