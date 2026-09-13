@@ -1028,6 +1028,16 @@ namespace RT64 {
             rtParams.reflectionOverride = std::clamp(overrideValue, 0.0f, 1.0f);
         }
 
+        // PDRT64_RT_BAKED: how much of the game's baked vertex shade survives into the
+        // frame. 1 is the game's lighting, 0 is only what the tracer finds for itself.
+        {
+            static const float bakedScale = []() {
+                const char *env = getenv("PDRT64_RT_BAKED");
+                return (env != nullptr) ? float(atof(env)) : 1.0f;
+            }();
+            rtParams.bakedLightScale = std::clamp(bakedScale, 0.0f, 4.0f);
+        }
+
         rtParams.motionBlurStrength = rtConfig.motionBlurStrength;
         rtParams.motionBlurSamples = uint32_t(std::max(rtConfig.motionBlurSamples, 0));
         rtParams.visualizationMode = rtConfig.visualizationMode;

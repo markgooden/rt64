@@ -56,6 +56,12 @@ namespace interop {
         // reflectionFactor 0 (rt64_state.cpp:1685) - so without this the reflection pass
         // is correct and invisible, and cannot be measured or looked at.
         float reflectionOverride;
+
+        // How much of the game's baked vertex shade to keep, from PDRT64_RT_BAKED.
+        // One is the game's own lighting; zero is the scene lit only by what the tracer
+        // can find. The split between albedo and this term exists precisely so the
+        // question can be asked.
+        float bakedLightScale;
         float giBackgroundStrength;
         float motionBlurStrength;
         float tonemapExposure;
@@ -95,6 +101,7 @@ namespace interop {
             farDist = 1000.0f;
             giDiffuseStrength = 0.0f;
             reflectionOverride = 0.0f;
+            bakedLightScale = 1.0f;
             giBackgroundStrength = 0.0f;
             motionBlurStrength = 0.0f;
             tonemapExposure = 0.6f;

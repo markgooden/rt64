@@ -213,7 +213,7 @@ void PrimaryRayGen() {
     // The baked lighting, seeded into the direct light buffer for DirectRayGen to add to.
     // With no lights in range this reconstructs exactly what the game draws - albedo times
     // shade - and a light contributes on top of it rather than instead of it.
-    gDirectLightAccum[pixel] = float4(payload.ambient, 1.0f);
+    gDirectLightAccum[pixel] = float4(payload.ambient * RtParams.bakedLightScale, 1.0f);
     gFlow[pixel] = float2(0.0f, 0.0f);
     gReactiveMask[pixel] = 0.0f;
     gLockMask[pixel] = 0.0f;
